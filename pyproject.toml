@@ -1,0 +1,10 @@
+[project]
+name = "ia-toxic-comments-detector"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "polars>=2.1.0",
+    "spacy>=3.8.18",
+]
