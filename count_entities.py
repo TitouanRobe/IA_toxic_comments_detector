@@ -6,6 +6,7 @@ présentes dans data/test.csv.
 """
 
 import re
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -13,7 +14,9 @@ import polars as pl
 import spacy
 
 CSV_PATH = Path(__file__).parent / "data" / "train.csv"
-OUTPUT_PATH = Path(__file__).parent / "data" / "test_entities.csv"
+OUTPUT_PATH = Path(__file__).parent / "data" / "train_entities.csv"
+TOTALS_PATH = Path(__file__).parent / "data" / "train_entities_totals.csv"
+FORCE_RECOMPUTE = False  # True pour ignorer le cache et tout recalculer
 
 # Labels spaCy utiles pour le RGPD (identité, organisation, localisation)
 SPACY_LABELS = {"PERSON", "ORG", "GPE", "LOC", "FAC", "NORP"}
@@ -52,26 +55,46 @@ def extract_counts(texts: list[str], batch_size: int = 256, n_process: int = 1) 
         disable=["tagger", "parser", "attribute_ruler", "lemmatizer"],
     )
     results = []
-    for text, doc in zip(texts, nlp.pipe(texts, batch_size=batch_size, n_process=n_process)):
+    total = len(texts)
+    start = time.time()
+    for i, (text, doc) in enumerate(
+        zip(texts, nlp.pipe(texts, batch_size=batch_size, n_process=n_process)), start=1
+    ):
         counts = Counter(ent.label_ for ent in doc.ents if ent.label_ in SPACY_LABELS)
         counts.update(regex_entities(text))
         results.append(counts)
+        if i % 100 == 0 or i == total:
+            elapsed = time.time() - start
+            eta = elapsed / i * (total - i)
+            print(
+                f"\rLigne {i}/{total} ({i / total:.1%}) - {elapsed:.0f}s écoulées, ~{eta:.0f}s restantes",
+                end="",
+                flush=True,
+            )
+    print()
     return results
 
 
 def main(limit: int | None = None) -> None:
-    df = pl.read_csv(CSV_PATH)
-    if limit:
-        df = df.head(limit)
-
-    counters = extract_counts(df["comment_text"].fill_null("").to_list())
-
     labels = sorted(SPACY_LABELS | set(PII_PATTERNS))
-    entities_df = pl.DataFrame(
-        {label: [c.get(label, 0) for c in counters] for label in labels},
-        schema={label: pl.Int32 for label in labels},
-    )
-    df = pl.concat([df, entities_df], how="horizontal")
+
+    if OUTPUT_PATH.exists() and not limit and not FORCE_RECOMPUTE:
+        print(f"Cache trouvé, chargement de {OUTPUT_PATH} (pas de recalcul)")
+        df = pl.read_csv(OUTPUT_PATH)
+    else:
+        df = pl.read_csv(CSV_PATH)
+        if limit:
+            df = df.head(limit)
+
+        counters = extract_counts(df["comment_text"].fill_null("").to_list())
+
+        entities_df = pl.DataFrame(
+            {label: [c.get(label, 0) for c in counters] for label in labels},
+            schema={label: pl.Int32 for label in labels},
+        )
+        df = pl.concat([df, entities_df], how="horizontal")
+        df.write_csv(OUTPUT_PATH)
+        print(f"Détail par commentaire : {OUTPUT_PATH}")
 
     # Total par classe
     totals = (
@@ -87,9 +110,8 @@ def main(limit: int | None = None) -> None:
     )
     print(f"{df.height} commentaires analysés")
     print(totals)
-
-    df.write_csv(OUTPUT_PATH)
-    print(f"Détail par commentaire : {OUTPUT_PATH}")
+    totals.write_csv(TOTALS_PATH)
+    print(f"Totaux par classe : {TOTALS_PATH}")
 
 
 if __name__ == "__main__":
