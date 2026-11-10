@@ -1,0 +1,21 @@
+# Contexte de build Docker : on n'envoie que ce dont l'API a besoin.
+# Principe : tout exclure, puis ré-autoriser explicitement.
+*
+
+!pyproject.toml
+!uv.lock
+!api.py
+!toxicity/
+!artifacts/
+
+# Jamais de données dans l'image (RGPD) : data/ est exclu par le "*" ci-dessus,
+# ces règles protègent aussi contre un CSV qui traînerait dans un dossier autorisé.
+**/*.csv
+**/*.parquet
+
+# Fichiers inutiles même dans les dossiers autorisés.
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store
+# LAYA n'est pas entraîné : à retirer de cette liste une fois le modèle prêt.
+artifacts/laya/

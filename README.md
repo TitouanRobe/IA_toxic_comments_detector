@@ -5,7 +5,7 @@ Détection de toxicité : chaque texte reçoit un **score de 0 à 100** (= 100 �
 ## Installation
 
 ```bash
-uv sync
+uv sync   # inférence + groupes "train" (spaCy, polars, scikit-learn) et "dev"
 ```
 
 - **Windows (RTX 5080)** : torch est installé depuis l'index PyTorch CUDA 13.0 (compatible driver CUDA 13.2). Vérifier : `uv run python -c "import torch; print(torch.cuda.get_device_name())"`.
@@ -34,7 +34,17 @@ uv run python predict.py --model bert "You are an idiot"
 
 # Comparaison des modèles entraînés
 uv run python compare.py
+
+# API d'inférence (documentation interactive : http://127.0.0.1:8000/docs)
+uv run uvicorn api:app --reload
+curl -X POST http://127.0.0.1:8000/model -H "Content-Type: application/json" \
+     -d '{"text": "You are an idiot", "model": "bert"}'
 ```
+
+`POST /model` avec un corps JSON `{"text": "...", "model": "bert"}` (`model` optionnel, `bert` par défaut ; `text` limité à 5000 caractères) renvoie :
+- `is_toxic` : `true` si le score de la classe `toxic` est > 70 ;
+- `toxicity_score` : score de la classe `toxic` (0-100) ;
+- `classes` : scores (0-100) de `severe_toxic`, `obscene`, `threat`, `insult`, `identity_hate`.
 
 Sorties : `artifacts/<modèle>/` (poids) et `results/<modèle>/metrics.json` (métriques).
 
@@ -46,6 +56,38 @@ Sorties : `artifacts/<modèle>/` (poids) et `results/<modèle>/metrics.json` (m�
 - puis la ROC-AUC par classe.
 
 Les temps ne sont comparables qu'entre modèles évalués sur le même matériel.
+
+## Déploiement (Docker / Cloud Run)
+
+L'image ne contient que l'API et les dépendances d'inférence (`dependencies` du `pyproject.toml`) :
+PyTorch CPU, sans le groupe `train` (spaCy, polars, scikit-learn) ni `data/` (voir `.dockerignore`).
+Les poids de `artifacts/` sont embarqués : **réentraîner les modèles complètement avant de construire l'image.**
+
+```bash
+# Test local (sur Mac Apple Silicon, --platform est nécessaire : Cloud Run tourne en amd64)
+docker build --platform linux/amd64 -t toxic-api .
+docker run --rm -p 8080:8080 toxic-api
+curl localhost:8080/health
+
+# Publication dans Artifact Registry (région Paris)
+REGION=europe-west9; PROJECT=<id-projet-gcp>
+IMAGE=$REGION-docker.pkg.dev/$PROJECT/toxic/toxic-api:v1
+gcloud artifacts repositories create toxic --repository-format=docker --location=$REGION
+gcloud auth configure-docker $REGION-docker.pkg.dev
+docker build --platform linux/amd64 -t $IMAGE . && docker push $IMAGE
+
+# Déploiement (privé par défaut : appel avec un jeton IAM)
+gcloud run deploy toxic-api --image $IMAGE --region $REGION \
+  --cpu 2 --memory 4Gi --concurrency 4 --cpu-boost \
+  --min-instances 0 --no-allow-unauthenticated
+curl -X POST "$(gcloud run services describe toxic-api --region $REGION --format 'value(status.url)')/model" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Content-Type: application/json" -d '{"text": "You are an idiot"}'
+```
+
+- `--min-instances 1` supprime les démarrages à froid, mais l'instance est facturée en continu.
+- `TORCH_NUM_THREADS` (2 par défaut dans l'image) doit suivre `--cpu` ; `PRELOAD_MODELS` (défaut `bert`) liste les modèles chargés au démarrage.
+- Sans Docker en local : `gcloud builds submit --tag $IMAGE` (le `.gcloudignore` garantit l'envoi de `artifacts/`).
 
 ## Ajouter un modèle
 

@@ -1,11 +1,19 @@
-"""Chargement des données Jigsaw et découpage train / validation / test."""
+"""Chargement des données Jigsaw et découpage train / validation / test.
+
+polars et scikit-learn ne servent qu'à l'entraînement : ils sont importés dans
+les fonctions, pour que l'inférence (api.py, image Docker) puisse s'en passer.
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-import polars as pl
-from sklearn.model_selection import train_test_split
+
+if TYPE_CHECKING:
+    import polars as pl
 
 from toxicity.config import LABELS, SEED, TEST_CSV, TEST_LABELS_CSV, TEXT_COL, TRAIN_CSV
 
@@ -36,6 +44,9 @@ def load_train_val(
     val_ratio: float = 0.1, limit: int | None = None, seed: int = SEED
 ) -> tuple[Split, Split]:
     """train.csv découpé en train/validation, stratifié sur 'toxic'."""
+    import polars as pl
+    from sklearn.model_selection import train_test_split
+
     df = _subsample(pl.read_csv(TRAIN_CSV), limit, seed)
     idx = np.arange(df.height)
     train_idx, val_idx = train_test_split(
@@ -46,6 +57,8 @@ def load_train_val(
 
 def load_test(limit: int | None = None, seed: int = SEED, path: Path = TEST_CSV) -> Split:
     """test (texte) + test_labels.csv ; les lignes notées -1 (non évaluées) sont exclues."""
+    import polars as pl
+
     df = pl.read_csv(path).select("id", TEXT_COL).join(pl.read_csv(TEST_LABELS_CSV), on="id", how="inner")
     df = df.filter(pl.col("toxic") != -1)
     return _to_split(_subsample(df, limit, seed))
