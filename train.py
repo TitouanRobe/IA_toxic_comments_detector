@@ -3,6 +3,8 @@
 Exemples :
   uv run python train.py --model bert                                   # entraînement complet (Windows / GPU)
   uv run python train.py --model bert --limit 2000 --epochs 1 --max-length 128 --test-limit 2000   # test rapide Mac
+  uv run python train.py --model lstm --epochs 5                        # LSTM, entraînement complet
+  uv run python train.py --model laya --epochs 2                        # LAYA (ModernBERT-large), GPU conseillé
 """
 
 import argparse
@@ -64,9 +66,18 @@ def main() -> None:
     model.save(model_dir)
     print(f"Modèle sauvegardé : {model_dir}")
 
-    test_metrics = compute_metrics(model.predict_proba(test_split.texts), test_split.labels)
-    print(f"Test : mean ROC-AUC = {test_metrics['mean_roc_auc']:.4f}, "
-          f"F1 (score>=50) = {test_metrics['f1_any_toxic']:.4f}")
+    # Temps de traitement : inférence sur tout le jeu de test (tokenisation comprise).
+    start = time.time()
+    test_probs = model.predict_proba(test_split.texts)
+    inference_seconds = time.time() - start
+    ms_per_comment = 1000 * inference_seconds / max(len(test_split), 1)
+
+    test_metrics = compute_metrics(test_probs, test_split.labels)
+    print(f"Test : mean ROC-AUC = {test_metrics['mean_roc_auc']:.4f} | score>=50 : "
+          f"précision = {test_metrics['precision_any_toxic']:.4f}, "
+          f"rappel = {test_metrics['recall_any_toxic']:.4f}, F1 = {test_metrics['f1_any_toxic']:.4f}")
+    print(f"Temps de traitement : {inference_seconds:.1f}s pour {len(test_split)} commentaires "
+          f"({ms_per_comment:.2f} ms/commentaire)")
 
     results_dir = RESULTS_DIR / cfg.model
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -75,6 +86,8 @@ def main() -> None:
         "device": describe(get_device()),
         "config": cfg.to_dict(),
         "train_seconds": round(train_seconds, 1),
+        "inference_seconds": round(inference_seconds, 2),
+        "ms_per_comment": round(ms_per_comment, 3),
         "test": test_metrics,
         **fit_info,
     }
