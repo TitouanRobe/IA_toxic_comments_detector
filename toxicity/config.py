@@ -8,7 +8,7 @@ DATA_DIR = ROOT / "data"
 ARTIFACTS_DIR = ROOT / "artifacts"  # poids des modèles entraînés
 RESULTS_DIR = ROOT / "results"  # métriques, pour la comparaison
 
-TRAIN_CSV = DATA_DIR / "train.csv"
+TRAIN_CSV = DATA_DIR / "train_anonymized.csv"
 TEST_CSV = DATA_DIR / "test.csv"
 TEST_LABELS_CSV = DATA_DIR / "test_labels.csv"
 
