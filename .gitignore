@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Modèles entraînés et résultats
+artifacts/
+results/
+
+train_entities.csv
+train_entities_totals.csv
+
