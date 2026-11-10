@@ -5,12 +5,14 @@ description = "Détection de toxicité (score 0-100) : BERT, LSTM, LAYA"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.162.2",
     "numpy>=2.0",
     "polars>=2.1.0",
     "scikit-learn>=1.5",
     "spacy>=3.8.18",
     "torch>=2.9",
     "transformers>=4.46",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 # Windows (RTX 5080, Blackwell sm_120) : wheels PyTorch CUDA 13.0, compatibles driver CUDA 13.2.
@@ -22,3 +24,8 @@ torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32'" }]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]

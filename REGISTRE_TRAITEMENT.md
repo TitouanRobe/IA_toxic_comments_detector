@@ -16,7 +16,7 @@ Dernière mise à jour : 2026-11-10
 | Rubrique | Description |
 |---|---|
 | **Finalité** | Entraîner et évaluer un modèle de classification de commentaires toxiques (toxic, severe_toxic, obscene, threat, insult, identity_hate). Projet académique. |
-| **Base légale** | [À confirmer : intérêt légitime / mission de recherche] |
+| **Base légale** | intérêt légitime |
 | **Personnes concernées** | Auteurs de commentaires Wikipedia présents dans le jeu de données (non identifiés directement par le projet). |
 | **Source des données** | Jeu de données public « Toxic Comment Classification » (Jigsaw / Kaggle), fichiers `train.csv`, `test.csv`, `test_labels.csv`. Aucune collecte directe. |
 | **Catégories de données** | Texte libre des commentaires, identifiant du commentaire, labels de toxicité. |

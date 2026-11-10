@@ -34,7 +34,17 @@ uv run python predict.py --model bert "You are an idiot"
 
 # Comparaison des modèles entraînés
 uv run python compare.py
+
+# API d'inférence (documentation interactive : http://127.0.0.1:8000/docs)
+uv run uvicorn api:app --reload
+curl -X POST http://127.0.0.1:8000/model -H "Content-Type: application/json" \
+     -d '{"text": "You are an idiot", "model": "bert"}'
 ```
+
+`POST /model` avec un corps JSON `{"text": "...", "model": "bert"}` (`model` optionnel, `bert` par défaut ; `text` limité à 5000 caractères) renvoie :
+- `is_toxic` : `true` si le score de la classe `toxic` est > 70 ;
+- `toxicity_score` : score de la classe `toxic` (0-100) ;
+- `classes` : scores (0-100) de `severe_toxic`, `obscene`, `threat`, `insult`, `identity_hate`.
 
 Sorties : `artifacts/<modèle>/` (poids) et `results/<modèle>/metrics.json` (métriques).
 
