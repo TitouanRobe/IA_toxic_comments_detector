@@ -28,7 +28,7 @@ FORCE_RECOMPUTE = False  # True pour ignorer le cache
 KEEP_ORIGINAL = False  # True pour garder comment_text (non anonymisé) dans le CSV de sortie
 
 # Labels spaCy à anonymiser (NORP, GPE, LOC volontairement conservés)
-SPACY_LABELS = {"PERSON", "ORG", "FAC"}
+SPACY_LABELS = {"PERSON", "FAC"}
 
 STREET_SUFFIX = (
     r"Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Place|Pl|"
