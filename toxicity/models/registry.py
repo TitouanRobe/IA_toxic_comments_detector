@@ -1,7 +1,6 @@
-"""Registre des modèles disponibles : ajouter ici LSTM et LAYA quand ils existeront.
+"""Registre des modèles disponibles (BERT, LSTM, LAYA).
 
-Les imports sont paresseux pour ne pas charger transformers quand on utilise
-un modèle qui n'en a pas besoin (ex. LAYA / scikit-learn).
+Les imports sont paresseux : seul le module du modèle demandé est chargé.
 """
 
 from importlib import import_module
@@ -11,8 +10,8 @@ from toxicity.models.base import ToxicityModel
 # nom -> "module:Classe"
 MODELS: dict[str, str] = {
     "bert": "toxicity.models.bert:BertToxicityModel",
-    # "lstm": "toxicity.models.lstm:LstmToxicityModel",
-    # "laya": "toxicity.models.laya:LayaToxicityModel",
+    "lstm": "toxicity.models.lstm:LstmToxicityModel",
+    "laya": "toxicity.models.laya:LayaToxicityModel",
 }
 
 

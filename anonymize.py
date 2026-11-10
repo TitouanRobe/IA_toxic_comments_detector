@@ -20,9 +20,9 @@ import polars as pl
 import spacy
 
 DATA_DIR = Path(__file__).parent / "data"
-CSV_PATH = DATA_DIR / "train.csv"
-OUTPUT_PATH = DATA_DIR / "train_anonymized.csv"
-SAMPLE_PATH = DATA_DIR / "train_anonymized_sample.csv"
+CSV_PATH = DATA_DIR / "test.csv"
+OUTPUT_PATH = DATA_DIR / "test_anonymized.csv"
+SAMPLE_PATH = DATA_DIR / "test_anonymized_sample.csv"
 
 FORCE_RECOMPUTE = False  # True pour ignorer le cache
 KEEP_ORIGINAL = False  # True pour garder comment_text (non anonymisé) dans le CSV de sortie

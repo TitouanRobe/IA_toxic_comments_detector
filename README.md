@@ -20,16 +20,34 @@ uv run python train.py --model bert --limit 2000 --epochs 1 --max-length 128 --t
 # Entraînement complet (Windows / GPU)
 uv run python train.py --model bert
 
+# LSTM (BiLSTM entraîné from scratch, batch 128 et lr 1e-3 par défaut)
+uv run python train.py --model lstm --limit 2000 --epochs 1 --max-length 128 --test-limit 1000   # test rapide Mac
+uv run python train.py --model lstm --epochs 5                                                     # complet (Windows / GPU)
+
+# LAYA (encodeur ModernBERT-large de convaiinnovations/laya + tête 6 classes, batch 16 et lr 1e-5 par défaut)
+# ~840 Mo téléchargés au premier lancement (cache Hugging Face) ; lent sur Mac, GPU conseillé.
+uv run python train.py --model laya --limit 2000 --epochs 1 --max-length 128 --test-limit 1000   # test rapide Mac
+uv run python train.py --model laya --epochs 2                                                     # complet (Windows / GPU)
+
 # Score d'un texte
 uv run python predict.py --model bert "You are an idiot"
 
-# Comparaison des modèles entraînés (mean ROC-AUC sur le test)
+# Comparaison des modèles entraînés
 uv run python compare.py
 ```
 
 Sorties : `artifacts/<modèle>/` (poids) et `results/<modèle>/metrics.json` (métriques).
 
-## Ajouter un modèle (LSTM, LAYA)
+`compare.py` affiche, pour chaque modèle, sur le jeu de test :
+- **AUC moy** : ROC-AUC moyenne des 6 classes (critère du meilleur modèle) ;
+- **précision / rappel / F1@50** : décision binaire « toxique si score ≥ 50 » ;
+- **ms/comm.** : temps de traitement moyen d'un commentaire (inférence sur tout le test, tokenisation comprise) ;
+- **train (s)** : durée d'entraînement ;
+- puis la ROC-AUC par classe.
+
+Les temps ne sont comparables qu'entre modèles évalués sur le même matériel.
+
+## Ajouter un modèle
 
 1. Créer `toxicity/models/<nom>.py` avec une classe héritant de `ToxicityModel` (`fit`, `predict_proba`, `save`, `load`).
    Un modèle PyTorch peut réutiliser `toxicity/models/torch_trainer.py` ; un modèle scikit-learn implémente simplement `fit` / `predict_proba`.
