@@ -1,0 +1,153 @@
+# Déploiement de l'API sur GKE : Deployment + autoscaling + exposition HTTPS (Ingress).
+# PROJECT_ID et DOMAIN sont remplacés au moment de l'apply (voir README) :
+#   sed -e "s/PROJECT_ID/$PROJECT/" -e "s/DOMAIN/$DOMAIN/" k8s/toxic-api.yaml | kubectl apply -f -
+#
+# Prérequis créés avec gcloud (voir README) : l'IP statique "toxic-api-ip"
+# et la politique Cloud Armor "toxic-api-policy".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: toxic-api
+  labels:
+    app: toxic-api
+spec:
+  # Pas de "replicas" : c'est le HorizontalPodAutoscaler qui en décide
+  # (sinon chaque kubectl apply le ramènerait à la valeur fixée ici).
+  selector:
+    matchLabels:
+      app: toxic-api
+  template:
+    metadata:
+      labels:
+        app: toxic-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # utilisateur "app" créé dans le Dockerfile
+      containers:
+        - name: toxic-api
+          image: europe-west9-docker.pkg.dev/PROJECT_ID/toxic/toxic-api:v1
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PRELOAD_MODELS
+              value: "bert"
+            - name: TORCH_NUM_THREADS # à aligner sur resources.requests.cpu
+              value: "2"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 6Gi # LAYA seul occupe ~1,5 Go, ~3 Go le temps du chargement
+            limits:
+              memory: 6Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Le chargement des modèles au démarrage peut prendre une minute.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 36 # 3 minutes max
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 5
+---
+# Autoscaling : de 1 à 5 pods selon le CPU (l'inférence PyTorch est limitée par le CPU).
+# Chaque pod réserve 2 CPU et 6 Gi : 5 pods = 10 CPU et 30 Gi facturés.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: toxic-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: toxic-api
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300 # évite de supprimer un pod qui a mis 1 min à démarrer
+---
+# Service interne, ciblé par l'Ingress (NEG : le load balancer envoie directement aux pods).
+apiVersion: v1
+kind: Service
+metadata:
+  name: toxic-api
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "toxic-api-backend"}'
+spec:
+  type: ClusterIP
+  selector:
+    app: toxic-api
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# Réglages du backend du load balancer : health check, timeout, Cloud Armor.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: toxic-api-backend
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: /health
+    port: 8080
+  timeoutSec: 120 # premier appel d'un modèle non préchargé (ex : LAYA) : chargement lent
+  securityPolicy:
+    name: toxic-api-policy # limitation de débit par IP (créée avec gcloud)
+---
+# Redirection HTTP -> HTTPS.
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: toxic-api-frontend
+spec:
+  redirectToHttps:
+    enabled: true
+---
+# Certificat TLS géré par Google (le DNS du domaine doit pointer vers l'IP statique).
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: toxic-api-cert
+spec:
+  domains:
+    - DOMAIN
+---
+# Load balancer HTTP(S) global de Google, point d'entrée public de l'API.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: toxic-api
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: toxic-api-ip
+    networking.gke.io/managed-certificates: toxic-api-cert
+    networking.gke.io/v1beta1.FrontendConfig: toxic-api-frontend
+spec:
+  defaultBackend:
+    service:
+      name: toxic-api
+      port:
+        number: 80

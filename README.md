@@ -57,36 +57,66 @@ Sorties : `artifacts/<modèle>/` (poids) et `results/<modèle>/metrics.json` (m�
 
 Les temps ne sont comparables qu'entre modèles évalués sur le même matériel.
 
-## Déploiement (Docker / Cloud Run)
+## Déploiement (Docker / GKE)
 
 L'image ne contient que l'API et les dépendances d'inférence (`dependencies` du `pyproject.toml`) :
 PyTorch CPU, sans le groupe `train` (spaCy, polars, scikit-learn) ni `data/` (voir `.dockerignore`).
 Les poids de `artifacts/` sont embarqués : **réentraîner les modèles complètement avant de construire l'image.**
 
+Le déploiement est décrit dans [k8s/toxic-api.yaml](k8s/toxic-api.yaml) :
+
+| Objet | Rôle |
+|---|---|
+| `Deployment` | Pods de l'API : 2 CPU, 6 Gi, non-root, sondes sur `/health` |
+| `HorizontalPodAutoscaler` | 1 à 5 pods, cible 70 % de CPU |
+| `Service` | Point d'accès interne aux pods, ciblé par l'Ingress |
+| `Ingress` + `ManagedCertificate` + `FrontendConfig` | Load balancer HTTPS public, certificat géré par Google, redirection HTTP → HTTPS |
+| `BackendConfig` | Health check, timeout de 120 s, politique Cloud Armor |
+
 ```bash
-# Test local (sur Mac Apple Silicon, --platform est nécessaire : Cloud Run tourne en amd64)
+# Test local (sur Mac Apple Silicon, --platform est nécessaire : les nœuds GKE sont en amd64)
 docker build --platform linux/amd64 -t toxic-api .
 docker run --rm -p 8080:8080 toxic-api
 curl localhost:8080/health
 
 # Publication dans Artifact Registry (région Paris)
-REGION=europe-west9; PROJECT=<id-projet-gcp>
+REGION=europe-west1; PROJECT=shopflow-cleo-maelle
 IMAGE=$REGION-docker.pkg.dev/$PROJECT/toxic/toxic-api:v1
 gcloud artifacts repositories create toxic --repository-format=docker --location=$REGION
 gcloud auth configure-docker $REGION-docker.pkg.dev
 docker build --platform linux/amd64 -t $IMAGE . && docker push $IMAGE
 
-# Déploiement (privé par défaut : appel avec un jeton IAM)
-gcloud run deploy toxic-api --image $IMAGE --region $REGION \
-  --cpu 2 --memory 4Gi --concurrency 4 --cpu-boost \
-  --min-instances 0 --no-allow-unauthenticated
-curl -X POST "$(gcloud run services describe toxic-api --region $REGION --format 'value(status.url)')/model" \
-  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
-  -H "Content-Type: application/json" -d '{"text": "You are an idiot"}'
+# Cluster GKE Autopilot (une seule fois)
+gcloud container clusters create-auto toxic-cluster --region $REGION
+gcloud container clusters get-credentials toxic-cluster --region $REGION
+
+# IP publique statique (globale, exigée par l'Ingress) : faire pointer le DNS du domaine dessus (enregistrement A)
+DOMAIN=<api.mondomaine.fr>
+gcloud compute addresses create toxic-api-ip --global
+gcloud compute addresses describe toxic-api-ip --global --format 'value(address)'
+
+# Cloud Armor : 100 requêtes / minute / IP, au-delà réponse 429
+gcloud compute security-policies create toxic-api-policy
+gcloud compute security-policies rules create 1000 --security-policy toxic-api-policy \
+  --src-ip-ranges "*" --action throttle \
+  --rate-limit-threshold-count 100 --rate-limit-threshold-interval-sec 60 \
+  --conform-action allow --exceed-action deny-429 --enforce-on-key IP
+
+# Déploiement : PROJECT_ID et DOMAIN du manifest remplacés
+sed -e "s/PROJECT_ID/$PROJECT/" -e "s/DOMAIN/$DOMAIN/" k8s/toxic-api.yaml | kubectl apply -f -
+kubectl rollout status deployment/toxic-api
+kubectl describe managedcertificate toxic-api-cert   # attendre "Status: Active" (jusqu'à ~1 h)
+
+# Appel
+curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" -d '{"text": "You are an idiot"}'
 ```
 
-- `--min-instances 1` supprime les démarrages à froid, mais l'instance est facturée en continu.
-- `TORCH_NUM_THREADS` (2 par défaut dans l'image) doit suivre `--cpu` ; `PRELOAD_MODELS` (défaut `bert`) liste les modèles chargés au démarrage.
+- **Nouvelle version** : changer le tag (`:v2`), pousser l'image, puis `kubectl set image deployment/toxic-api toxic-api=$REGION-docker.pkg.dev/$PROJECT/toxic/toxic-api:v2`.
+- **Sans domaine** (test) : `kubectl port-forward svc/toxic-api 8080:80` puis `curl localhost:8080/health`. Le certificat géré ne s'active pas sans DNS valide.
+- **Autoscaling** : `kubectl get hpa toxic-api` montre la charge et le nombre de pods. Chaque pod charge ses propres modèles : un pod de plus = 2 CPU et 6 Gi facturés en plus.
+- **Sécurité** : Cloud Armor limite le débit par IP mais n'authentifie pas les appelants. Pour restreindre l'accès, ajouter une clé d'API dans `api.py` ou activer IAP sur le `BackendConfig` (appelants avec un compte Google).
+- `TORCH_NUM_THREADS` doit suivre `resources.requests.cpu` ; `PRELOAD_MODELS` (défaut `bert`) liste les modèles chargés au démarrage. Précharger `laya` rallonge le démarrage : augmenter alors `failureThreshold` de la `startupProbe`.
+- Logs et état : `kubectl logs deploy/toxic-api`, `kubectl get pods`.
 - Sans Docker en local : `gcloud builds submit --tag $IMAGE` (le `.gcloudignore` garantit l'envoi de `artifacts/`).
 
 ## Ajouter un modèle

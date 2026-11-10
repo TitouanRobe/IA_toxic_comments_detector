@@ -17,5 +17,3 @@
 **/__pycache__
 **/*.py[cod]
 **/.DS_Store
-# LAYA n'est pas entraîné : à retirer de cette liste une fois le modèle prêt.
-artifacts/laya/
