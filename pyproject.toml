@@ -4,28 +4,47 @@ version = "0.1.0"
 description = "Détection de toxicité (score 0-100) : BERT, LSTM, LAYA"
 readme = "README.md"
 requires-python = ">=3.12"
+# Dépendances d'inférence (API) : les seules installées dans l'image Docker.
 dependencies = [
     "fastapi>=0.162.2",
     "numpy>=2.0",
-    "polars>=2.1.0",
-    "scikit-learn>=1.5",
-    "spacy>=3.8.18",
     "torch>=2.9",
     "transformers>=4.46",
     "uvicorn[standard]>=0.54.0",
 ]
 
+[dependency-groups]
+# Entraînement, évaluation et anonymisation (train.py, compare.py, anonymize.py...).
+train = [
+    "en-core-web-sm",
+    "polars>=2.1.0",
+    "scikit-learn>=1.5",
+    "spacy>=3.8.18",
+]
+dev = [
+    "httpx>=0.28.1",
+]
+
+[tool.uv]
+# `uv sync` en local installe tout ; l'image Docker n'installe que `dependencies`.
+default-groups = ["train", "dev"]
+
 # Windows (RTX 5080, Blackwell sm_120) : wheels PyTorch CUDA 13.0, compatibles driver CUDA 13.2.
+# Linux (image Docker / Cloud Run) : wheels CPU, sans CUDA (image beaucoup plus légère).
 # macOS (M3) : wheels PyPI standards, avec support MPS.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32'" }]
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
-[dependency-groups]
-dev = [
-    "httpx>=0.28.1",
-]
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

@@ -18,7 +18,6 @@ from transformers import get_linear_schedule_with_warmup
 from toxicity.config import TrainConfig
 from toxicity.data import Split
 from toxicity.device import DeviceInfo
-from toxicity.metrics import compute_metrics
 
 Collate = Callable[[list[tuple[str, np.ndarray]]], dict]
 Forward = Callable[[nn.Module, dict], torch.Tensor]
@@ -103,6 +102,9 @@ def train(
     lr: float,
 ) -> dict:
     """Entraîne `module` en place et y recharge le meilleur checkpoint (mean ROC-AUC val)."""
+    # Import local : scikit-learn n'est installé que pour l'entraînement (groupe "train").
+    from toxicity.metrics import compute_metrics
+
     batch_size = cfg.batch_size or dev.default_batch_size
     train_loader = make_loader(train_split, collate, batch_size, dev, cfg, shuffle=True)
     val_loader = make_loader(val_split, collate, batch_size * 2, dev, cfg, shuffle=False)

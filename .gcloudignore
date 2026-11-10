@@ -1,0 +1,19 @@
+# Fichiers envoyés à Cloud Build (`gcloud builds submit` / `gcloud run deploy --source`).
+# Sans ce fichier, gcloud reprend le .gitignore, qui exclut artifacts/ :
+# l'image serait construite sans les poids du modèle.
+# Syntaxe .gitignore : on exclut tout le premier niveau, puis on ré-autorise.
+/*
+!/Dockerfile
+!/.dockerignore
+!/pyproject.toml
+!/uv.lock
+!/api.py
+!/toxicity/
+!/artifacts/
+
+# Jamais de données (RGPD).
+*.csv
+*.parquet
+__pycache__/
+.DS_Store
+artifacts/laya/

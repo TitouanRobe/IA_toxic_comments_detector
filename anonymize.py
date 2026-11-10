@@ -182,9 +182,12 @@ def main(limit: int | None = None) -> None:
     texts = df["comment_text"].fill_null("").to_list()
     anonymized, totals = anonymize_all(texts)
 
-    df = df.with_columns(pl.Series("comment_text_anon", anonymized))
-    if not KEEP_ORIGINAL:
-        df = df.drop("comment_text")
+    # Le texte anonymisé remplace "comment_text" à la même place : le fichier garde
+    # les colonnes du CSV source et est directement utilisable par train.py.
+    original = df["comment_text"]
+    df = df.with_columns(pl.Series("comment_text", anonymized))
+    if KEEP_ORIGINAL:
+        df = df.with_columns(original.alias("comment_text_original"))
     df.write_csv(output)
 
     print(f"{df.height} commentaires anonymisés -> {output}")
