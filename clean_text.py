@@ -1,15 +1,17 @@
 """Nettoie le CSV anonymisé : emojis, ponctuation, casse, espaces.
 
-Entrée  : data/train_anonymized.csv (colonne comment_text_anon, produite par anonymize.py)
-Sortie  : data/train_clean.csv      (colonne comment_text_clean ajoutée, comment_text_anon conservée)
+Entrée  : data/<split>_anonymized.csv (colonne comment_text ou comment_text_anon, produite par anonymize.py)
+Sortie  : data/<split>_clean.csv      (colonne comment_text = texte nettoyé)
 
 Les pseudonymes ([PERSON_1], [EMAIL_1]...) sont protégés : ni mis en minuscules,
 ni débarrassés de leurs crochets.
 
 Usage :
-    python clean_text.py
+    python clean_text.py                # train : train_anonymized.csv -> train_clean.csv
+    python clean_text.py --split test   # test  : test_anonymized.csv  -> test_clean.csv
 """
 
+import argparse
 import re
 import unicodedata
 from pathlib import Path
@@ -17,10 +19,7 @@ from pathlib import Path
 import polars as pl
 
 DATA_DIR = Path(__file__).parent / "data"
-INPUT_PATH = DATA_DIR / "train_anonymized.csv"
-OUTPUT_PATH = DATA_DIR / "train_clean.csv"
-
-SRC_COL = "comment_text"
+SRC_COLS = ("comment_text", "comment_text_anon")  # selon la version d'anonymize.py
 DST_COL = "comment_text"
 
 # Pseudonymes produits par anonymize.py : à ne pas toucher
@@ -63,13 +62,22 @@ def clean_text(text: str | None) -> str:
 
 
 def main() -> None:
-    df = pl.read_csv(INPUT_PATH)
-    cleaned = [clean_text(t) for t in df[SRC_COL].to_list()]
-    df = df.with_columns(pl.Series(DST_COL, cleaned))
-    df.write_csv(OUTPUT_PATH)
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--split", choices=["train", "test"], default="train")
+    split = p.parse_args().split
+    input_path = DATA_DIR / f"{split}_anonymized.csv"
+    output_path = DATA_DIR / f"{split}_clean.csv"
+
+    df = pl.read_csv(input_path)
+    src_col = next((c for c in SRC_COLS if c in df.columns), None)
+    if src_col is None:
+        raise SystemExit(f"Aucune colonne texte ({', '.join(SRC_COLS)}) dans {input_path}")
+    cleaned = [clean_text(t) for t in df[src_col].to_list()]
+    df = df.drop(src_col).with_columns(pl.Series(DST_COL, cleaned))
+    df.write_csv(output_path)
 
     empty = sum(1 for t in cleaned if not t)
-    print(f"{df.height} commentaires nettoyés -> {OUTPUT_PATH}")
+    print(f"{df.height} commentaires nettoyés -> {output_path}")
     print(f"Commentaires devenus vides : {empty}")
 
 

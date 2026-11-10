@@ -126,13 +126,13 @@ class LstmToxicityModel(ToxicityModel):
     def save(self, directory: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
         torch.save(self.module.state_dict(), directory / "model.pt")
-        (directory / "vocab.json").write_text(json.dumps(self.vocab, ensure_ascii=False))
+        (directory / "vocab.json").write_text(json.dumps(self.vocab, ensure_ascii=False), encoding="utf-8")
         (directory / "train_config.json").write_text(json.dumps(self.config.to_dict(), indent=2))
 
     @classmethod
     def load(cls, directory: Path) -> "LstmToxicityModel":
         config = TrainConfig(**json.loads((directory / "train_config.json").read_text()))
-        vocab = json.loads((directory / "vocab.json").read_text())
+        vocab = json.loads((directory / "vocab.json").read_text(encoding="utf-8"))
         model = cls(config, vocab=vocab)
         model.module.load_state_dict(torch.load(directory / "model.pt", map_location="cpu"))
         return model

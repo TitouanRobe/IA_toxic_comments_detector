@@ -1,6 +1,7 @@
 """Chargement des données Jigsaw et découpage train / validation / test."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -43,8 +44,8 @@ def load_train_val(
     return _to_split(df[train_idx]), _to_split(df[val_idx])
 
 
-def load_test(limit: int | None = None, seed: int = SEED) -> Split:
-    """test.csv + test_labels.csv ; les lignes notées -1 (non évaluées) sont exclues."""
-    df = pl.read_csv(TEST_CSV).join(pl.read_csv(TEST_LABELS_CSV), on="id", how="inner")
+def load_test(limit: int | None = None, seed: int = SEED, path: Path = TEST_CSV) -> Split:
+    """test (texte) + test_labels.csv ; les lignes notées -1 (non évaluées) sont exclues."""
+    df = pl.read_csv(path).select("id", TEXT_COL).join(pl.read_csv(TEST_LABELS_CSV), on="id", how="inner")
     df = df.filter(pl.col("toxic") != -1)
     return _to_split(_subsample(df, limit, seed))
