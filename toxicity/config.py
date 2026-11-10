@@ -8,7 +8,7 @@ DATA_DIR = ROOT / "data"
 ARTIFACTS_DIR = ROOT / "artifacts"  # poids des modèles entraînés
 RESULTS_DIR = ROOT / "results"  # métriques, pour la comparaison
 
-TRAIN_CSV = DATA_DIR / "train_anonymized.csv"
+TRAIN_CSV = DATA_DIR / "train_clean.csv"
 TEST_CSV = DATA_DIR / "test.csv"
 TEST_LABELS_CSV = DATA_DIR / "test_labels.csv"
 
@@ -23,7 +23,7 @@ class TrainConfig:
     """Hyperparamètres d'entraînement. Les champs à None prennent la valeur
     par défaut adaptée au matériel (voir device.py) ou au modèle."""
 
-    model: str = "bert"
+    model: str = "bert_clean"
     epochs: int = 2
     batch_size: int | None = None
     lr: float | None = None
