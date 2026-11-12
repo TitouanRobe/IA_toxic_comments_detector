@@ -91,9 +91,11 @@ gcloud container clusters create-auto toxic-cluster --region $REGION
 gcloud container clusters get-credentials toxic-cluster --region $REGION
 
 # IP publique statique (globale, exigée par l'Ingress) : faire pointer le DNS du domaine dessus (enregistrement A)
-DOMAIN=<api.mondomaine.fr>
 gcloud compute addresses create toxic-api-ip --global
-gcloud compute addresses describe toxic-api-ip --global --format 'value(address)'
+IP=$(gcloud compute addresses describe toxic-api-ip --global --format 'value(address)')
+# Sans nom de domaine : sslip.io résout <IP>.sslip.io vers <IP>, sans configuration DNS.
+# Avec un domaine à soi : DOMAIN=api.mondomaine.fr et un enregistrement A vers $IP.
+DOMAIN=$IP.sslip.io; echo $DOMAIN
 
 # Cloud Armor : 100 requêtes / minute / IP, au-delà réponse 429
 gcloud compute security-policies create toxic-api-policy
