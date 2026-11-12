@@ -1,0 +1,10 @@
+# Tableaux de bord Grafana chargés depuis des fichiers (ConfigMap), versionnés dans git.
+apiVersion: 1
+providers:
+  - name: toxic-api
+    folder: Toxic API
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

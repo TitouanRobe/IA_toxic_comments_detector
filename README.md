@@ -209,6 +209,63 @@ curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" \
 - Logs et état : `kubectl logs deploy/toxic-api` (journal JSON pseudonymisé), `kubectl get pods`.
 - Sans Docker en local : `gcloud builds submit --tag $IMAGE`.
 
+## Supervision (Prometheus / Grafana)
+
+Fichiers dans [k8s/monitoring/](k8s/monitoring/), namespace `monitoring`, **non exposé sur Internet** (accès par `kubectl port-forward`).
+
+| Composant | Rôle |
+|---|---|
+| Métriques de l'API ([toxicity/metrics_prom.py](toxicity/metrics_prom.py)) | Port 8081, interne au cluster (absent du Service et de l'Ingress). Requêtes par statut, latence, temps d'inférence, attente en file, scores, longueur des textes, CPU et mémoire du processus. Aucune donnée personnelle, labels bornés (un scan d'URL ne crée pas de séries) |
+| Prometheus | Découvre les pods de l'API (même ceux ajoutés par l'autoscaling), collecte toutes les 10 s, évalue les alertes. Historique 15 jours sur disque persistant (10 Gi). Droit minimal : lister les pods du namespace `default` |
+| Grafana | Tableau de bord « Toxic API - supervision » (page d'accueil) + logs pseudonymisés de Cloud Logging dans **Explore** |
+
+**Alertes** ([alert-rules.yml](k8s/monitoring/alert-rules.yml)) :
+
+| Alerte | Déclencheur | Ce qu'elle révèle |
+|---|---|---|
+| `LatencySLOViolated` | < 95 % des requêtes en moins d'1 s, 5 min | SLO de latence non tenu |
+| `HighErrorRate` | > 1 % de 5xx, 5 min | Erreurs serveur |
+| `OverloadShedding` | Des 503 (file d'attente pleine), 2 min | Capacité insuffisante |
+| `HighCPU` / `HighMemory` | > 90 % des 2 CPU / > 5 Go, 5 min | Saturation, fuite mémoire, risque d'arrêt OOM |
+| `PodDown` / `BelowMinReplicas` / `ApiMetricsAbsent` | Pod muet / < 3 pods / plus aucun pod | Panne, failover |
+| `AuthFailureSpike` | > 30 clés refusées/min, 2 min | Force brute sur les clés |
+| `ScanDetected` | > 20 req/min vers des URL inconnues | Scan de vulnérabilités |
+| `ToxicityRatioAnomaly` | > 80 % de textes toxiques, 15 min | Dérive des données, abus, modèle défaillant |
+
+**Installation** (après le déploiement de l'API, qui expose le port de métriques) :
+
+```bash
+# Mot de passe admin de Grafana, dans un Secret (jamais dans git)
+kubectl create namespace monitoring
+kubectl -n monitoring create secret generic grafana-admin --from-literal=password="$(openssl rand -base64 18)"
+
+# Lecture des logs de l'API par Grafana (Workload Identity, lecture seule)
+gcloud projects add-iam-policy-binding $PROJECT --role=roles/logging.viewer --condition=None \
+  --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT.svc.id.goog/subject/ns/monitoring/sa/grafana"
+
+kubectl kustomize k8s/monitoring | sed "s/PROJECT_ID/$PROJECT/" | kubectl apply -f -
+kubectl -n monitoring rollout status deployment/prometheus deployment/grafana
+```
+
+**Accès** (un terminal par outil, laissé ouvert) :
+
+```bash
+kubectl -n monitoring port-forward svc/grafana 3000:3000        # http://localhost:3000 (admin)
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.password}' | base64 -d   # mot de passe
+kubectl -n monitoring port-forward svc/prometheus 9090:9090     # http://localhost:9090/alerts
+```
+
+**Analyser une anomalie** : repérer l'heure sur le tableau de bord, puis dans Grafana **Explore → Cloud Logging**, filtrer les logs de l'API sur cette période :
+
+```
+resource.type="k8s_container" AND resource.labels.container_name="toxic-api"
+jsonPayload.event="auth_failed"          # quelles IP (pseudonymisées) échouent, à quel rythme
+jsonPayload.status>=500                  # erreurs serveur et délestage
+jsonPayload.latency_ms>2000              # requêtes lentes : quel pod, quelle longueur de texte
+```
+
+Modifier une règle ou le tableau de bord : éditer le fichier puis relancer la commande `kubectl kustomize … | kubectl apply` (le pod concerné redémarre seul).
+
 ## Test de charge (Locust)
 
 Tous les réglages sont dans [loadtest/config.toml](loadtest/config.toml) : cible (`host`, `model`), fichier de la clé, rythme des utilisateurs, scénarios (paliers modifiables) et instant du failover. Chaque utilisateur virtuel envoie ~1 requête/s à `POST /model` avec des textes de longueurs variées (aucune donnée personnelle) :

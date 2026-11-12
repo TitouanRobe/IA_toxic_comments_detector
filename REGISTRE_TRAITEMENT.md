@@ -59,6 +59,7 @@ Dernière mise à jour : 2026-11-10
 | Fichiers d'audit (`*_entities*.csv`, contiennent le texte original) | [À définir, à supprimer après usage recommandé] |
 | Texte envoyé à l'API | Aucune : durée de la requête (mémoire uniquement) |
 | Journal d'accès pseudonymisé (Cloud Logging) | 30 jours (rétention par défaut du bucket `_Default`) |
+| Métriques de supervision (Prometheus) | 15 jours. Aucune donnée personnelle : compteurs et durées agrégés, sans texte, IP ni identifiant client |
 
 ## 5. Droits des personnes
 

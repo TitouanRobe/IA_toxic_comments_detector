@@ -97,7 +97,12 @@ spec:
           # n'est pas retéléchargé par un nœud qui l'a déjà en cache, qui garderait l'ancienne image.
           image: REGION-docker.pkg.dev/PROJECT_ID/toxic/toxic-api:IMAGE_TAG
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+            # Métriques Prometheus : port non publié par le Service, donc inaccessible depuis
+            # Internet ; seul Prometheus (namespace monitoring) le lit.
+            - name: metrics
+              containerPort: 8081
           env:
             - name: PRELOAD_MODELS
               value: "bert"

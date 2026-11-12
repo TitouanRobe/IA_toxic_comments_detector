@@ -1,0 +1,174 @@
+{
+  "uid": "toxic-api",
+  "title": "Toxic API - supervision",
+  "description": "Trafic, latence, saturation, sécurité et comportement du modèle de l'API de détection de toxicité.",
+  "tags": ["toxic-api"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "time": { "from": "now-1h", "to": "now" },
+  "graphTooltip": 1,
+  "panels": [
+    { "type": "row", "title": "Vue d'ensemble", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "collapsed": false, "panels": [] },
+    {
+      "type": "stat", "title": "Débit /model", "description": "Requêtes par seconde sur /model, tous statuts.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" },
+      "targets": [{ "refId": "A", "expr": "sum(rate(toxic_api_requests_total{path=\"/model\"}[1m])) or vector(0)" }]
+    },
+    {
+      "type": "stat", "title": "Latence P95 /model", "description": "95 % des requêtes /model répondent en moins de ce temps (file d'attente comprise).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "orange", "value": 0.5 }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "background" },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(toxic_api_request_duration_seconds_bucket{path=\"/model\"}[1m])))" }]
+    },
+    {
+      "type": "stat", "title": "Erreurs 5xx", "description": "Part des réponses 5xx (dont 503 de délestage) sur 1 min.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 2, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "orange", "value": 0.001 }, { "color": "red", "value": 0.01 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "background" },
+      "targets": [{ "refId": "A", "expr": "(sum(rate(toxic_api_requests_total{status=~\"5..\"}[1m])) / sum(rate(toxic_api_requests_total[1m]))) or vector(0)" }]
+    },
+    {
+      "type": "stat", "title": "Pods actifs", "description": "Pods de l'API dont Prometheus lit les métriques (suit l'autoscaling).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "none", "thresholds": { "mode": "absolute", "steps": [
+        { "color": "red", "value": null }, { "color": "orange", "value": 2 }, { "color": "green", "value": 3 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "background" },
+      "targets": [{ "refId": "A", "expr": "count(up{job=\"toxic-api\"} == 1) or vector(0)" }]
+    },
+    {
+      "type": "stat", "title": "Échecs d'authentification", "description": "Clés d'API refusées (401) par minute.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "orange", "value": 5 }, { "color": "red", "value": 30 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "background" },
+      "targets": [{ "refId": "A", "expr": "(sum(rate(toxic_api_requests_total{status=\"401\"}[1m])) * 60) or vector(0)" }]
+    },
+    {
+      "type": "stat", "title": "Alertes actives", "description": "Règles d'alerte Prometheus en état firing (détail en bas).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "none", "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "none", "colorMode": "background" },
+      "targets": [{ "refId": "A", "expr": "count(ALERTS{alertstate=\"firing\"}) or vector(0)" }]
+    },
+
+    { "type": "row", "title": "Trafic et latence", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "collapsed": false, "panels": [] },
+    {
+      "type": "timeseries", "title": "Requêtes par seconde, par statut HTTP",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 15, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "sum by (status) (rate(toxic_api_requests_total{path=\"/model\"}[1m]))", "legendFormat": "{{status}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Latence /model : P50, P95, P99",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 0 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(toxic_api_request_duration_seconds_bucket{path=\"/model\"}[1m])))", "legendFormat": "P50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(toxic_api_request_duration_seconds_bucket{path=\"/model\"}[1m])))", "legendFormat": "P95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(toxic_api_request_duration_seconds_bucket{path=\"/model\"}[1m])))", "legendFormat": "P99" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Où passe le temps : inférence vs attente en file (P95)",
+      "description": "Si l'attente domine, il manque des pods ; si l'inférence domine, le modèle est trop lent pour le CPU.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, model) (rate(toxic_api_inference_duration_seconds_bucket[1m])))", "legendFormat": "inférence {{model}}" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(toxic_api_queue_wait_seconds_bucket[1m])))", "legendFormat": "attente en file" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Requêtes en attente, par pod",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "toxic_api_queue_waiting{job=\"toxic-api\"}", "legendFormat": "{{pod}}" }]
+    },
+
+    { "type": "row", "title": "Ressources des pods", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }, "collapsed": false, "panels": [] },
+    {
+      "type": "timeseries", "title": "CPU par pod (cœurs utilisés, 2 réservés)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 2, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "rate(process_cpu_seconds_total{job=\"toxic-api\"}[1m])", "legendFormat": "{{pod}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Mémoire par pod (limite 6 Gi)",
+      "description": "Une hausse continue pendant la charge soutenue signalerait une fuite mémoire.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "process_resident_memory_bytes{job=\"toxic-api\"}", "legendFormat": "{{pod}}" }]
+    },
+
+    { "type": "row", "title": "Sécurité et comportement anormal", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 }, "collapsed": false, "panels": [] },
+    {
+      "type": "timeseries", "title": "Requêtes refusées : 401 (clé), 503 (surcharge), 404 et URL inconnues (scan)",
+      "description": "Les 429 de Cloud Armor sont bloqués avant l'API : ils ne figurent pas ici (logs du load balancer).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 15 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (status) (rate(toxic_api_requests_total{status=~\"401|404|422|503\"}[1m]))", "legendFormat": "HTTP {{status}}" },
+        { "refId": "B", "expr": "sum(rate(toxic_api_requests_total{path=\"other\"}[1m]))", "legendFormat": "URL inconnues" }
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Part de textes jugés toxiques (score > 70)",
+      "description": "Une variation brutale signale une dérive des données, un usage anormal ou un modèle défaillant.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{ "refId": "A", "expr": "1 - sum by (model) (rate(toxic_api_toxicity_score_bucket{le=\"70.0\"}[5m])) / sum by (model) (rate(toxic_api_toxicity_score_count[5m]))", "legendFormat": "{{model}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Longueur des textes reçus (P50, P95)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "drawStyle": "line", "fillOpacity": 0 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(toxic_api_text_length_chars_bucket[5m])))", "legendFormat": "P50 (caractères)" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(toxic_api_text_length_chars_bucket[5m])))", "legendFormat": "P95 (caractères)" }
+      ]
+    },
+    {
+      "type": "table", "title": "Alertes en cours",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "showHeader": true },
+      "transformations": [
+        { "id": "labelsToFields", "options": {} },
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "Value": true, "__name__": true, "alertstate": true, "job": true, "instance": true } } }
+      ],
+      "targets": [{ "refId": "A", "expr": "ALERTS{alertstate=\"firing\"}", "instant": true, "format": "table" }]
+    }
+  ]
+}

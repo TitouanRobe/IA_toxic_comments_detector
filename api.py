@@ -28,6 +28,8 @@ Variables d'environnement :
   TORCH_NUM_THREADS  threads PyTorch ; à aligner sur le nombre de vCPU (défaut : torch décide).
   MAX_CONCURRENT_INFERENCES  inférences simultanées par pod (défaut : 1), les autres attendent.
   INFERENCE_QUEUE_TIMEOUT    attente max en file (s, défaut : 20) avant une réponse 503.
+  METRICS_PORT       port des métriques Prometheus (défaut : 8081, 0 pour désactiver),
+                     interne au cluster, voir toxicity/metrics_prom.py.
 """
 
 import hashlib
@@ -45,7 +47,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
-from toxicity import audit_log
+from toxicity import audit_log, metrics_prom
 from toxicity.config import ARTIFACTS_DIR, LABELS
 from toxicity.models.base import ToxicityModel
 from toxicity.models.registry import MODELS, get_model_class
@@ -139,6 +141,7 @@ async def lifespan(_: FastAPI):
                            "(ou AUTH_DISABLED=1 en local)")
     if threads := os.environ.get("TORCH_NUM_THREADS"):
         torch.set_num_threads(int(threads))
+    metrics_prom.start_server()
     # Un modèle demandé au préchargement mais absent fait échouer le démarrage :
     # mieux vaut un déploiement refusé qu'un service qui répond 503.
     for name in filter(None, (n.strip() for n in os.environ.get("PRELOAD_MODELS", DEFAULT_MODEL).split(","))):
@@ -165,7 +168,9 @@ async def access_log_and_security_headers(request: Request, call_next):
         status = response.status_code
     except Exception:
         _log_request(request, request_id, 500, start, exc_info=True)
+        _record_metrics(request, 500, start)
         raise
+    _record_metrics(request, status, start)
     # /health est appelé en continu par les sondes et le load balancer : pas de bruit dans les logs.
     if not (request.url.path == "/health" and status < 400):
         _log_request(request, request_id, status, start)
@@ -178,6 +183,12 @@ async def access_log_and_security_headers(request: Request, call_next):
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+def _record_metrics(request: Request, status: int, start: float) -> None:
+    path = metrics_prom.path_label(request.url.path)
+    metrics_prom.REQUESTS.labels(request.method, path, str(status)).inc()
+    metrics_prom.REQUEST_DURATION.labels(path).observe(time.perf_counter() - start)
 
 
 def _log_request(request: Request, request_id: str, status: int, start: float, exc_info: bool = False) -> None:
@@ -230,15 +241,25 @@ def predict(req: PredictionRequest, request: Request) -> Prediction:
         raise HTTPException(404, e.args[0]) from e
     except FileNotFoundError as e:
         raise HTTPException(503, str(e)) from e
-    if not _inference_slots.acquire(timeout=INFERENCE_QUEUE_TIMEOUT):
+    metrics_prom.TEXT_LENGTH.observe(len(text))
+    wait_start = time.perf_counter()
+    metrics_prom.QUEUE_WAITING.inc()
+    try:
+        acquired = _inference_slots.acquire(timeout=INFERENCE_QUEUE_TIMEOUT)
+    finally:
+        metrics_prom.QUEUE_WAITING.dec()
+    metrics_prom.QUEUE_WAIT.observe(time.perf_counter() - wait_start)
+    if not acquired:
         raise HTTPException(503, "Service surchargé, réessayer dans quelques secondes",
                             headers={"Retry-After": "5"})
     try:
-        probs = dict(zip(LABELS, clf.predict_proba([text])[0]))
+        with metrics_prom.INFERENCE_DURATION.labels(model).time():
+            probs = dict(zip(LABELS, clf.predict_proba([text])[0]))
     finally:
         _inference_slots.release()
     toxic_score = 100 * float(probs["toxic"])
     request.state.toxicity_score = round(toxic_score, 1)
+    metrics_prom.TOXICITY_SCORE.labels(model).observe(toxic_score)
     return Prediction(
         model=model,
         text=text,
