@@ -23,6 +23,7 @@ Variables d'environnement :
                        Google Secret Manager monté dans le pod (voir k8s/toxic-api.yaml).
   LOG_PSEUDONYM_KEY(_FILE)  clé de pseudonymisation des logs, voir toxicity/audit_log.py.
   AUTH_DISABLED        "1" pour désactiver l'authentification (développement local uniquement).
+  ALLOWED_MODELS     modèles servis, séparés par des virgules (défaut : tous) ; les autres -> 404.
   PRELOAD_MODELS     modèles chargés au démarrage, séparés par des virgules (défaut : bert).
                      Évite que la première requête après un démarrage à froid paie le chargement.
   TORCH_NUM_THREADS  threads PyTorch ; à aligner sur le nombre de vCPU (défaut : torch décide).
@@ -119,11 +120,16 @@ def require_api_key(request: Request, key: str | None = Security(_api_key_header
     request.state.client = audit_log.pseudonymize("client", matched)
 
 
+# Modèles servis par ce déploiement (défaut : tous). Un modèle chargé reste en mémoire : la
+# liste fixe donc la mémoire maximale d'un pod (LAYA seul demande ~3 Go au chargement).
+ALLOWED_MODELS = [m.strip() for m in os.environ.get("ALLOWED_MODELS", ",".join(MODELS)).split(",") if m.strip()]
+
+
 def load_model(name: str) -> ToxicityModel:
     """Charge le modèle à la première demande puis le garde en mémoire.
-    Lève KeyError (modèle inconnu) ou FileNotFoundError (modèle non entraîné)."""
-    if name not in MODELS:
-        raise KeyError(f"Modèle inconnu '{name}'. Disponibles : {', '.join(MODELS)}")
+    Lève KeyError (modèle inconnu ou non servi) ou FileNotFoundError (modèle non entraîné)."""
+    if name not in MODELS or name not in ALLOWED_MODELS:
+        raise KeyError(f"Modèle '{name}' non disponible. Disponibles : {', '.join(ALLOWED_MODELS)}")
     with _lock:
         if name not in _models:
             model_dir = ARTIFACTS_DIR / name

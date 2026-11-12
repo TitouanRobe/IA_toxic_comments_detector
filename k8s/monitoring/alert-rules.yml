@@ -43,11 +43,11 @@ groups:
           summary: "Pod {{ $labels.pod }} au-delà de 90 % de ses 2 CPU depuis 5 min"
 
       - alert: HighMemory
-        expr: process_resident_memory_bytes{job="toxic-api"} > 5e9
+        expr: process_resident_memory_bytes{job="toxic-api"} > 1.7e9
         for: 5m
         labels: {severity: warning}
         annotations:
-          summary: "Pod {{ $labels.pod }} au-delà de 5 Go de mémoire (limite 6 Gi) : risque d'arrêt OOM"
+          summary: "Pod {{ $labels.pod }} au-delà de 1,7 Go de mémoire (limite 2 Gi) : risque d'arrêt OOM"
 
   - name: toxic-api-availability
     rules:

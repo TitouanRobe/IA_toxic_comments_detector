@@ -46,7 +46,9 @@ metadata:
   namespace: monitoring
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: standard-rwo
+  # Disque standard (HDD) : suffisant pour des métriques, et hors du quota SSD de la région,
+  # déjà consommé par les disques des nœuds Autopilot.
+  storageClassName: standard
   resources:
     requests:
       storage: 10Gi

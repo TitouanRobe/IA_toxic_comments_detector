@@ -114,7 +114,7 @@ Le déploiement est décrit dans [k8s/toxic-api.yaml](k8s/toxic-api.yaml) :
 
 | Objet | Rôle |
 |---|---|
-| `Deployment` | Pods de l'API : 2 CPU, 6 Gi, non-root, sondes sur `/health` |
+| `Deployment` | Pods de l'API : 2 CPU, 2 Gi, non-root, sondes sur `/health` ; modèles servis : `bert`, `lstm` (`ALLOWED_MODELS`) |
 | `HorizontalPodAutoscaler` | 1 à 5 pods, cible 70 % de CPU |
 | `Service` | Point d'accès interne aux pods, ciblé par l'Ingress |
 | `Ingress` + `ManagedCertificate` | Load balancer HTTPS public (HTTP désactivé), certificat géré par Google |
@@ -198,7 +198,7 @@ curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" \
 
 - **Nouvelle version** : nouveau `TAG`, build et push, puis la commande `sed … | kubectl apply` ci-dessus. Le changement de tag suffit à déclencher le déploiement (pas besoin de `rollout restart`). Retour arrière : relancer l'`apply` avec l'ancien `TAG`.
 - **Sans domaine** (test) : `kubectl port-forward svc/toxic-api 8080:80` puis `curl localhost:8080/health`. Le certificat géré ne s'active pas sans DNS valide.
-- **Autoscaling** : `kubectl get hpa toxic-api` montre la charge et le nombre de pods. Chaque pod charge ses propres modèles : un pod de plus = 2 CPU et 6 Gi facturés en plus.
+- **Autoscaling** : `kubectl get hpa toxic-api` montre la charge et le nombre de pods. Chaque pod charge ses propres modèles : un pod de plus = 2 CPU et 2 Gi facturés en plus.
 - **Mettre à jour un modèle** (sans reconstruire l'image) : `gcloud storage cp -r artifacts/bert gs://$PROJECT-toxic-models/` puis `kubectl rollout restart deployment/toxic-api` (les modèles sont chargés au démarrage des pods).
 - **Sécurité** : HTTPS uniquement (certificat géré, port 80 fermé, HSTS), clé d'API (`X-API-Key`) dont seule l'empreinte est stockée dans Secret Manager (lecture réservée au compte de service de l'API, accès tracés dans Cloud Audit Logs) et limitation de débit par IP (Cloud Armor).
 - **Ajouter un client ou changer de clé sans coupure** : ajouter une version du secret contenant toutes les empreintes valides (une par ligne), puis redémarrer (le secret est lu au démarrage du pod) :
@@ -226,7 +226,7 @@ Fichiers dans [k8s/monitoring/](k8s/monitoring/), namespace `monitoring`, **non 
 | `LatencySLOViolated` | < 95 % des requêtes en moins d'1 s, 5 min | SLO de latence non tenu |
 | `HighErrorRate` | > 1 % de 5xx, 5 min | Erreurs serveur |
 | `OverloadShedding` | Des 503 (file d'attente pleine), 2 min | Capacité insuffisante |
-| `HighCPU` / `HighMemory` | > 90 % des 2 CPU / > 5 Go, 5 min | Saturation, fuite mémoire, risque d'arrêt OOM |
+| `HighCPU` / `HighMemory` | > 90 % des 2 CPU / > 1,7 Go (limite 2 Gi), 5 min | Saturation, fuite mémoire, risque d'arrêt OOM |
 | `PodDown` / `BelowMinReplicas` / `ApiMetricsAbsent` | Pod muet / < 3 pods / plus aucun pod | Panne, failover |
 | `AuthFailureSpike` | > 30 clés refusées/min, 2 min | Force brute sur les clés |
 | `ScanDetected` | > 20 req/min vers des URL inconnues | Scan de vulnérabilités |
@@ -303,7 +303,7 @@ Résultats dans `loadtest/results/` : `<test>_stats.csv` (latences moyenne, P50/
 - **Mémoire pendant `soak`** : `kubectl top pods -l app=toxic-api` en début et en fin de test (une hausse continue signalerait une fuite).
 - **Mode interactif** : `uv run locust -f loadtest/locustfile.py` puis http://localhost:8089 (choix libre du nombre d'utilisateurs, graphiques en direct).
 - **Attaque (étape 6)** : relancer `stress` **sans** l'exception Cloud Armor : les requêtes au-delà de 100/min reçoivent `429` et n'atteignent pas l'API.
-- **Coût** : `stress` et `ramp` peuvent monter jusqu'à `maxReplicas` pods (2 CPU et 6 Gi chacun). Le quota de CPU de la région peut bloquer avant : les pods en trop restent alors en `Pending`.
+- **Coût** : `stress` et `ramp` peuvent monter jusqu'à `maxReplicas` pods (2 CPU et 2 Gi chacun). Le quota de CPU de la région peut bloquer avant : les pods en trop restent alors en `Pending`.
 
 ## Ajouter un modèle
 
