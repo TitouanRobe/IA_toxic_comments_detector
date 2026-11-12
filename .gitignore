@@ -226,3 +226,6 @@ results/
 train_entities.csv
 train_entities_totals.csv
 
+
+# Clé d'API utilisée par les tests de charge
+loadtest/.api_key

@@ -25,6 +25,18 @@ Dernière mise à jour : 2026-11-10
 | **Destinataires** | Équipe projet uniquement. |
 | **Transferts hors UE** | Aucun prévu. Hebergement Cloud UE |
 
+## 2 bis. Traitement : API de scoring et journal d'accès
+
+| Rubrique | Description |
+|---|---|
+| **Finalité** | Attribuer un score de toxicité aux textes envoyés par les applications clientes ; journaliser les accès pour la sécurité (détection d'abus, audit) et la supervision. |
+| **Base légale** | Intérêt légitime (sécurité du service). |
+| **Personnes concernées** | Applications clientes (identifiées par leur clé d'API) ; indirectement, les auteurs des textes analysés. |
+| **Données traitées** | Texte analysé : traité en mémoire uniquement, **jamais stocké ni journalisé**. Journal d'accès : pseudonyme du client, pseudonyme de l'adresse IP, date, chemin, statut, latence, modèle, longueur du texte, score. |
+| **Pseudonymisation** | Client et IP remplacés par un HMAC-SHA256 à clé secrète (`toxicity/audit_log.py`), irréversible sans la clé, stockée dans Secret Manager. Aucune IP en clair : journal d'uvicorn et logs du load balancer désactivés. |
+| **Destinataires** | Équipe projet (owners du projet GCP). |
+| **Hébergement** | GKE et Cloud Logging, région `europe-west1` (Belgique). |
+
 ## 3. Mesures de minimisation et de sécurité
 
 | Étape | Mesure | Script |
@@ -45,6 +57,8 @@ Dernière mise à jour : 2026-11-10
 | Données brutes (`data/*.csv` d'origine) | [À définir, ex : durée du projet] |
 | Données anonymisées (`train_anonymized.csv`) | [À définir] |
 | Fichiers d'audit (`*_entities*.csv`, contiennent le texte original) | [À définir, à supprimer après usage recommandé] |
+| Texte envoyé à l'API | Aucune : durée de la requête (mémoire uniquement) |
+| Journal d'accès pseudonymisé (Cloud Logging) | 30 jours (rétention par défaut du bucket `_Default`) |
 
 ## 5. Droits des personnes
 
@@ -55,3 +69,4 @@ Les données proviennent d'un jeu public et ne sont pas ré-identifiées par le 
 | Date | Modification |
 |---|---|
 | 2026-11-10 | Création du registre |
+| 2026-11-12 | Ajout du traitement « API de scoring et journal d'accès pseudonymisé » |

@@ -6,7 +6,8 @@
 !uv.lock
 !api.py
 !toxicity/
-!artifacts/
+# artifacts/ (poids des modèles) volontairement exclu : les modèles sont sur un volume
+# persistant (bucket Cloud Storage), pas dans l'image.
 
 # Jamais de données dans l'image (RGPD) : data/ est exclu par le "*" ci-dessus,
 # ces règles protègent aussi contre un CSV qui traînerait dans un dossier autorisé.
