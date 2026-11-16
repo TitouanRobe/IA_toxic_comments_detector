@@ -199,6 +199,19 @@ curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" \
 - **Nouvelle version** : nouveau `TAG`, build et push, puis la commande `sed … | kubectl apply` ci-dessus. Le changement de tag suffit à déclencher le déploiement (pas besoin de `rollout restart`). Retour arrière : relancer l'`apply` avec l'ancien `TAG`.
 - **Sans domaine** (test) : `kubectl port-forward svc/toxic-api 8080:80` puis `curl localhost:8080/health`. Le certificat géré ne s'active pas sans DNS valide.
 - **Autoscaling** : `kubectl get hpa toxic-api` montre la charge et le nombre de pods. Chaque pod charge ses propres modèles : un pod de plus = 2 CPU et 2 Gi facturés en plus.
+- **Suspendre / reprendre** (économiser : en Autopilot, 0 pod = presque plus de calcul facturé ; le load balancer et l'IP réservée restent facturés). Le HPA remonte l'API à `minReplicas` : il faut le supprimer avant de passer à 0, et le réappliquer à la reprise (`TAG` = tag actuellement déployé, `kubectl get deploy toxic-api -o jsonpath='{.spec.template.spec.containers[0].image}'`) :
+  ```bash
+  # Suspendre
+  kubectl delete hpa toxic-api
+  kubectl scale deployment/toxic-api --replicas=0
+  kubectl -n monitoring scale deployment/grafana deployment/prometheus --replicas=0
+
+  # Reprendre (le apply recrée le HPA ; attendre ~1-2 min que /health réponde)
+  sed -e "s/REGION/$REGION/" -e "s/PROJECT_ID/$PROJECT/" -e "s/DOMAIN/$DOMAIN/" -e "s/IMAGE_TAG/$TAG/" \
+    k8s/toxic-api.yaml | kubectl apply -f -
+  kubectl scale deployment/toxic-api --replicas=3
+  kubectl -n monitoring scale deployment/grafana deployment/prometheus --replicas=1
+  ```
 - **Mettre à jour un modèle** (sans reconstruire l'image) : `gcloud storage cp -r artifacts/bert gs://$PROJECT-toxic-models/` puis `kubectl rollout restart deployment/toxic-api` (les modèles sont chargés au démarrage des pods).
 - **Sécurité** : HTTPS uniquement (certificat géré, port 80 fermé, HSTS), clé d'API (`X-API-Key`) dont seule l'empreinte est stockée dans Secret Manager (lecture réservée au compte de service de l'API, accès tracés dans Cloud Audit Logs) et limitation de débit par IP (Cloud Armor).
 - **Ajouter un client ou changer de clé sans coupure** : ajouter une version du secret contenant toutes les empreintes valides (une par ligne), puis redémarrer (le secret est lu au démarrage du pod) :
