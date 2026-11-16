@@ -88,7 +88,7 @@ jsonPayload.ip="ip_c07d18a2e94b3f51"               # toute l'activité d'une mê
 jsonPayload.latency_ms > 1000                      # requêtes lentes
 ```
 
-`POST /model` avec un corps JSON `{"text": "...", "model": "bert"}` (`model` optionnel, `bert` par défaut ; `text` limité à 5000 caractères) renvoie :
+`POST /model` avec un corps JSON `{"text": "...", "model": "bert"}` (`model` optionnel, `bert` par défaut ; `text` limité à 1500 caractères) renvoie :
 - `is_toxic` : `true` si le score de la classe `toxic` est > 70 ;
 - `toxicity_score` : score de la classe `toxic` (0-100) ;
 - `classes` : scores (0-100) de `severe_toxic`, `obscene`, `threat`, `insult`, `identity_hate`.

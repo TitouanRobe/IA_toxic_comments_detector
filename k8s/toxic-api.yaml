@@ -188,7 +188,12 @@ spec:
     kind: Deployment
     name: toxic-api
   minReplicas: 3
-  maxReplicas: 10
+  # 15 (et non 10) : davantage de marge pour absorber une montée en charge soutenue (légitime
+  # ou attaque qui passe le filtre Cloud Armor). L'autoscaling reste une défense SECONDAIRE
+  # contre un flood court : un nouveau pod met 1 à 2 min à être prêt, donc il arrive après un
+  # pic bref. Les défenses PRIMAIRES sont le ban d'IP (Cloud Armor, avant le pod) et le
+  # délestage (503 via INFERENCE_QUEUE_TIMEOUT). Le scaling absorbe surtout une charge qui dure.
+  maxReplicas: 15
   metrics:
     - type: Resource
       resource:
@@ -198,6 +203,19 @@ spec:
           # 60 % plutôt que 70 % : un nouveau pod met 1 à 2 min à être prêt (nœud Autopilot,
           # chargement et préchauffage du modèle), il faut le demander avant la saturation.
           averageUtilization: 60
+    # Scaling idéal : sur le nombre de requêtes en attente de créneau d'inférence
+    # (metrics_prom.QUEUE_WAITING -> toxic_api_queue_waiting), pour réagir AVANT que la file
+    # sature, plutôt que sur le CPU (qui ne monte qu'une fois les pods déjà saturés). Nécessite
+    # l'adaptateur de métriques custom de Google Managed Prometheus (non déployé ici) : laissé en
+    # commentaire tant que l'adaptateur n'est pas en place, sinon l'HPA reste bloqué sur une
+    # métrique "unknown". Voir attack/defense_changes.md.
+    # - type: Pods
+    #   pods:
+    #     metric:
+    #       name: toxic_api_queue_waiting
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "3"  # ajouter des pods quand > 3 requêtes en attente par pod en moyenne
   behavior:
     scaleUp:
       stabilizationWindowSeconds: 0 # réagir dès le premier dépassement

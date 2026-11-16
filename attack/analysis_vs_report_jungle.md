@@ -1,4 +1,4 @@
-# Analyse — Notre attaque DoS contre l'API du groupe « Report Jungle »
+# Analyse — Notre attaque DoS contre l'API des Dragons celestes
 
 **Objet :** interpréter les tirs effectués avec `attack/dos.py` contre l'API du groupe
 « Report Jungle » (`http://136.82.199.122/laya/...`), pour le livrable étape 2

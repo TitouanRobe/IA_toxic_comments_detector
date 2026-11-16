@@ -55,7 +55,15 @@ from toxicity.models.registry import MODELS, get_model_class
 
 DEFAULT_MODEL = "bert"
 TOXIC_THRESHOLD = 70  # score "toxic" strictement supérieur à 70 -> toxique
-MAX_TEXT_LENGTH = 5000  # caractères ; évite qu'un texte énorme sature le modèle
+# Limite d'entrée (caractères). Les modèles tronquent à max_length = 256 tokens (~1200-1500
+# caractères, voir toxicity/models/*.py) : au-delà, le texte est jeté par le tokenizer et
+# n'influe pas sur le score. Accepter 5000 n'apportait donc rien au modèle tout en offrant une
+# surface d'attaque (épuisement de ressources par entrées surdimensionnées, « sponge input » :
+# réseau + parsing + tokenisation). 1500 couvre 96 % des commentaires réels (p95 du jeu de
+# données = 1319 car.) et s'aligne sur ce que le modèle lit vraiment. La même limite est
+# appliquée en amont, au load balancer (Cloud Armor), pour rejeter les corps trop gros avant
+# qu'ils n'atteignent le pod : voir k8s/cloud-armor-setup.sh.
+MAX_TEXT_LENGTH = 1500  # caractères
 OTHER_LABELS = [label for label in LABELS if label != "toxic"]
 
 _models: dict[str, ToxicityModel] = {}

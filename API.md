@@ -36,7 +36,7 @@ Le texte est envoyé dans le corps de la requête (et non dans l'URL), pour ne p
 
 | Champ | Type | Obligatoire | Description |
 |---|---|---|---|
-| `text` | string | oui | Texte à analyser, de 1 à 5000 caractères |
+| `text` | string | oui | Texte à analyser, de 1 à 1500 caractères |
 | `model` | string | non | `bert` (défaut), `lstm` ou `laya` |
 
 ```json
@@ -79,7 +79,7 @@ Le texte est envoyé dans le corps de la requête (et non dans l'URL), pour ne p
 | Code | Cause | Exemple de corps |
 |---|---|---|
 | `404` | Modèle inconnu | `{"detail": "Modèle inconnu 'xyz'. Disponibles : bert, lstm, laya"}` |
-| `422` | Corps invalide (`text` absent, vide ou de plus de 5000 caractères, JSON mal formé) | Détail de validation FastAPI |
+| `422` | Corps invalide (`text` absent, vide ou de plus de 1500 caractères, JSON mal formé) | Détail de validation FastAPI |
 | `503` | Modèle connu mais non entraîné, donc absent de `artifacts/` | `{"detail": "Modèle 'laya' non entraîné : lancez train.py --model laya"}` |
 
 ## Exemples
