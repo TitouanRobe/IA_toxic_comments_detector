@@ -265,9 +265,9 @@ metadata:
     kubernetes.io/ingress.class: "gce"
     kubernetes.io/ingress.global-static-ip-name: toxic-api-ip
     networking.gke.io/managed-certificates: toxic-api-cert
-    # HTTPS uniquement : pas d'écoute sur le port 80. Une redirection HTTP -> HTTPS ne suffit
-    # pas, le client aurait déjà envoyé sa clé et son texte en clair avant d'être redirigé.
-    kubernetes.io/ingress.allow-http: "false"
+    # HTTP autorisé (port 80) faute de HTTPS : la clé d'API et le texte circulent EN CLAIR.
+    # Repasser à "false" dès que le certificat géré est actif.
+    kubernetes.io/ingress.allow-http: "true"
 spec:
   defaultBackend:
     service:
