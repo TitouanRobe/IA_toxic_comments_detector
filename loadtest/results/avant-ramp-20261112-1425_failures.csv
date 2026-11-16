@@ -1,0 +1,3 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,POST /model,CatchResponseError('HTTP 429'),31,2026-11-12T13:25:40Z,2026-11-12T13:26:13Z
+POST,POST /model,CatchResponseError('HTTP 502'),1,2026-11-12T13:27:29Z,2026-11-12T13:27:29Z

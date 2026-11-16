@@ -1,0 +1,7 @@
+NAME                         CPU(cores)   MEMORY(bytes)   
+toxic-api-566fbb84d4-6cxnf   1463m        864Mi           
+toxic-api-566fbb84d4-f85sp   1566m        877Mi           
+toxic-api-566fbb84d4-nqsqk   1193m        487Mi           
+toxic-api-566fbb84d4-pl4g7   856m         539Mi           
+toxic-api-566fbb84d4-pmsnp   1391m        545Mi           
+toxic-api-566fbb84d4-xlbr5   774m         682Mi           
