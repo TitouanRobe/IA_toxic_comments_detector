@@ -224,6 +224,7 @@ artifacts/
 results/
 
 !loadtest/results/
+!attack/results/
 
 train_entities.csv
 train_entities_totals.csv

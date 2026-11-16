@@ -57,6 +57,13 @@ import httpx
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# Bug connu asyncio sur Windows : l'event loop par défaut ("Proactor") lève une exception interne
+# inoffensive mais bruyante (_ProactorBasePipeTransport._call_connection_lost) quand beaucoup de
+# connexions se ferment d'un coup - exactement notre cas avec une forte concurrence. L'event loop
+# "Selector" n'a pas ce défaut pour du simple HTTP (elle ne gère pas les sous-processus, inutilisés ici).
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 HERE = Path(__file__).resolve().parent
 RESULTS_DIR = HERE / "results"
 
@@ -266,9 +273,11 @@ def summarize(records: list, base: dict, wall: float, args) -> dict:
     }
 
 
-def svg_line_chart(series: list[tuple[str, list[float], str]], xlabels: list,
+def svg_line_chart(series: list[tuple[str, list[float | None], str]], xlabels: list,
                    title: str, ylabel: str, path: Path) -> None:
-    """Graphe en lignes minimaliste, sans dépendance. series = [(nom, valeurs, couleur)]."""
+    """Graphe en lignes minimaliste, sans dépendance. series = [(nom, valeurs, couleur)].
+    Une valeur None (pas de donnée cette seconde-là, ex. aucune réponse réussie) laisse un vrai
+    trou dans la courbe plutôt qu'une fausse chute à 0."""
     def esc(s):  # échappe le texte pour un SVG/XML bien formé (&, <, >).
         return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     title, ylabel = esc(title), esc(ylabel)
@@ -276,15 +285,18 @@ def svg_line_chart(series: list[tuple[str, list[float], str]], xlabels: list,
     xlabels = [esc(x) for x in xlabels]
     W, H, pad = 760, 380, 60
     plot_w, plot_h = W - 2 * pad, H - 2 * pad
-    all_vals = [v for _, vals, _ in series for v in vals] or [0, 1]
+    all_vals = [v for _, vals, _ in series for v in vals if v is not None] or [0, 1]
     ymax = max(all_vals) * 1.1 or 1
     n = max(len(xlabels), 2)
 
     def x(i): return pad + plot_w * i / (n - 1)
     def y(v): return pad + plot_h * (1 - v / ymax)
 
-    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
-             f'font-family="sans-serif" font-size="13">',
+    # viewBox (et pas seulement width/height) : sans lui, un CSS responsive qui redimensionne la
+    # balise <svg> (ex. "width:100%" dans le dashboard) ne redimensionne PAS les coordonnées
+    # dessinées à l'intérieur -> le graphique est tronqué au lieu d'être mis à l'échelle.
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
+             f'width="{W}" height="{H}" font-family="sans-serif" font-size="13">',
              f'<rect width="{W}" height="{H}" fill="white"/>',
              f'<text x="{W/2}" y="26" text-anchor="middle" font-size="16" font-weight="bold">{title}</text>']
     # Axes + grille horizontale (5 graduations).
@@ -302,10 +314,20 @@ def svg_line_chart(series: list[tuple[str, list[float], str]], xlabels: list,
     for i in range(0, n, step):
         parts.append(f'<text x="{x(i):.0f}" y="{H-pad+18:.0f}" text-anchor="middle" '
                      f'fill="#666">{xlabels[i] if i < len(xlabels) else ""}</text>')
-    # Courbes.
+    # Courbes : un <polyline> par segment continu (coupé à chaque None -> vrai trou, pas de chute à 0).
     for name, vals, color in series:
-        pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
-        parts.append(f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2"/>')
+        segment: list[str] = []
+        for i, v in enumerate(vals):
+            if v is None:
+                if len(segment) > 1:
+                    parts.append(f'<polyline points="{" ".join(segment)}" fill="none" '
+                                 f'stroke="{color}" stroke-width="2"/>')
+                segment = []
+            else:
+                segment.append(f"{x(i):.1f},{y(v):.1f}")
+        if len(segment) > 1:
+            parts.append(f'<polyline points="{" ".join(segment)}" fill="none" '
+                         f'stroke="{color}" stroke-width="2"/>')
     # Légende.
     for j, (name, _, color) in enumerate(series):
         ly = pad + 6 + j * 20
@@ -340,9 +362,9 @@ def write_outputs(result: dict, prefix: Path) -> None:
         # un graphique à 0 ms laisserait croire, à tort, à une latence excellente).
         if any(r["p50_ms"] is not None for r in ts):
             svg_line_chart(
-                [("p50", [r["p50_ms"] or 0 for r in ts], "#2563eb"),
-                 ("p95", [r["p95_ms"] or 0 for r in ts], "#f59e0b"),
-                 ("p99", [r["p99_ms"] or 0 for r in ts], "#dc2626")],
+                [("p50", [r["p50_ms"] for r in ts], "#2563eb"),
+                 ("p95", [r["p95_ms"] for r in ts], "#f59e0b"),
+                 ("p99", [r["p99_ms"] for r in ts], "#dc2626")],
                 xs, f"Latence sous charge ({result['concurrency']} clients) - {result['endpoint']}",
                 "latence (ms)", prefix.parent / f"{prefix.name}_latency.svg")
         else:

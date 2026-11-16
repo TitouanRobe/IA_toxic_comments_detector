@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" width="760" height="380" font-family="sans-serif" font-size="13">
+<rect width="760" height="380" fill="white"/>
+<text x="380.0" y="26" text-anchor="middle" font-size="16" font-weight="bold">Latence sous charge (2000 clients) - /laya/health</text>
+<line x1="60" y1="60" x2="700" y2="60" stroke="#eee"/><text x="52" y="64" text-anchor="end" fill="#666">59235</text>
+<line x1="60" y1="112" x2="700" y2="112" stroke="#eee"/><text x="52" y="116" text-anchor="end" fill="#666">47388</text>
+<line x1="60" y1="164" x2="700" y2="164" stroke="#eee"/><text x="52" y="168" text-anchor="end" fill="#666">35541</text>
+<line x1="60" y1="216" x2="700" y2="216" stroke="#eee"/><text x="52" y="220" text-anchor="end" fill="#666">23694</text>
+<line x1="60" y1="268" x2="700" y2="268" stroke="#eee"/><text x="52" y="272" text-anchor="end" fill="#666">11847</text>
+<line x1="60" y1="320" x2="700" y2="320" stroke="#eee"/><text x="52" y="324" text-anchor="end" fill="#666">0</text>
+<text x="18" y="190.0" text-anchor="middle" fill="#666" transform="rotate(-90 18 190.0)">latence (ms)</text>
+<text x="380.0" y="368" text-anchor="middle" fill="#666">temps (s)</text>
+<text x="60" y="338" text-anchor="middle" fill="#666">0</text>
+<text x="107" y="338" text-anchor="middle" fill="#666">4</text>
+<text x="155" y="338" text-anchor="middle" fill="#666">6</text>
+<text x="202" y="338" text-anchor="middle" fill="#666">8</text>
+<text x="250" y="338" text-anchor="middle" fill="#666">10</text>
+<text x="297" y="338" text-anchor="middle" fill="#666">12</text>
+<text x="344" y="338" text-anchor="middle" fill="#666">14</text>
+<text x="392" y="338" text-anchor="middle" fill="#666">16</text>
+<text x="439" y="338" text-anchor="middle" fill="#666">18</text>
+<text x="487" y="338" text-anchor="middle" fill="#666">20</text>
+<text x="534" y="338" text-anchor="middle" fill="#666">22</text>
+<text x="581" y="338" text-anchor="middle" fill="#666">24</text>
+<text x="629" y="338" text-anchor="middle" fill="#666">26</text>
+<text x="676" y="338" text-anchor="middle" fill="#666">28</text>
+<polyline points="60.0,150.2 83.7,318.2 107.4,310.3 131.1,314.3 154.8,314.6 178.5,314.3 202.2,310.7 225.9,307.3 249.6,308.0 273.3,304.6 297.0,304.5 320.7,300.9 344.4,305.4 368.1,296.8 391.9,302.5 415.6,301.1 439.3,292.2 463.0,281.8 486.7,301.1 510.4,289.1 534.1,294.5 557.8,285.8 581.5,289.7 605.2,291.5 628.9,285.9 652.6,295.7 676.3,292.7 700.0,284.3" fill="none" stroke="#2563eb" stroke-width="2"/>
+<polyline points="60.0,87.3 83.7,115.7 107.4,112.3 131.1,118.3 154.8,116.8 178.5,126.8 202.2,130.9 225.9,133.6 249.6,134.8 273.3,139.1 297.0,139.7 320.7,148.2 344.4,154.0 368.1,153.3 391.9,156.8 415.6,163.3 439.3,165.2 463.0,169.4 486.7,174.9 510.4,177.4 534.1,186.2 557.8,188.1 581.5,191.9 605.2,197.3 628.9,199.2 652.6,209.4 676.3,205.8 700.0,208.1" fill="none" stroke="#f59e0b" stroke-width="2"/>
+<polyline points="60.0,83.6 83.7,114.9 107.4,93.3 131.1,117.4 154.8,101.1 178.5,106.9 202.2,129.7 225.9,124.5 249.6,127.8 273.3,131.6 297.0,130.5 320.7,145.0 344.4,143.8 368.1,152.4 391.9,152.1 415.6,157.1 439.3,158.5 463.0,164.4 486.7,169.3 510.4,169.8 534.1,183.1 557.8,186.3 581.5,188.2 605.2,189.3 628.9,197.5 652.6,204.0 676.3,201.5 700.0,207.3" fill="none" stroke="#dc2626" stroke-width="2"/>
+<rect x="550" y="56" width="12" height="12" fill="#2563eb"/><text x="568" y="66" fill="#333">p50</text>
+<rect x="550" y="76" width="12" height="12" fill="#f59e0b"/><text x="568" y="86" fill="#333">p95</text>
+<rect x="550" y="96" width="12" height="12" fill="#dc2626"/><text x="568" y="106" fill="#333">p99</text>
+</svg>
