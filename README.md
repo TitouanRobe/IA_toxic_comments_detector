@@ -90,9 +90,9 @@ jsonPayload.latency_ms > 1000                      # requêtes lentes
 ```
 
 `POST /model` avec un corps JSON `{"text": "...", "model": "bert"}` (`model` optionnel, `bert` par défaut ; `text` limité à 1500 caractères) renvoie :
-- `is_toxic` : `true` si le score de la classe `toxic` est > 70 ;
-- `toxicity_score` : score de la classe `toxic` (0-100) ;
-- `classes` : scores (0-100) de `severe_toxic`, `obscene`, `threat`, `insult`, `identity_hate`.
+- `is_toxic` : `true` si le score de la classe `toxic` est > 70.
+
+Seule la décision est renvoyée : les scores restent côté serveur (journal, métriques), pour ne pas faciliter la copie du modèle.
 
 Sorties : `artifacts/<modèle>/` (poids) et `results/<modèle>/metrics.json` (métriques).
 
@@ -150,7 +150,7 @@ IP=$(gcloud compute addresses describe toxic-api-ip --global --format 'value(add
 DOMAIN=$IP.sslip.io; echo $DOMAIN
 
 # Cloud Armor (politique "toxic-api-policy", relançable) : 100 requêtes / minute / IP puis 429,
-# IP bannie 10 min au-delà de 120 req/min, corps de plus de 4096 octets rejetés (403).
+# IP bannie 10 min au-delà de 200 req/min, corps de plus de 4096 octets rejetés (403).
 bash k8s/cloud-armor-setup.sh
 
 # Clé d'API : la clé est donnée au client (la noter, elle n'est affichée qu'ici) ;
@@ -296,19 +296,22 @@ Tous les réglages sont dans [loadtest/config.toml](loadtest/config.toml) : cibl
 ```bash
 printf '%s' "dss_..." > loadtest/.api_key   # une clé valide (make_api_key.py) ; fichier exclu de git
 
-# Cloud Armor limite à 100 requêtes/min/IP et bannit au-delà de 120 : exception temporaire pour
+# Cloud Armor limite à 100 requêtes/min/IP et bannit au-delà de 200 : exception temporaire pour
 # la machine de test. Priorité 950 : après le filtre de taille (900), avant le ban (1000).
 MY_IP=$(curl -s https://ifconfig.me)
 gcloud compute security-policies rules create 950 --security-policy toxic-api-policy \
   --src-ip-ranges "$MY_IP/32" --action allow --description "test de charge (temporaire)"
+# L'API plafonne aussi à 4 requêtes en cours par IP et par pod (429) : le lever le temps du test.
+kubectl set env deployment/toxic-api MAX_IN_FLIGHT_PER_IP=0
 
 uv run python loadtest/run.py --list    # scénarios disponibles
 uv run python loadtest/run.py smoke     # vérification rapide
 uv run python loadtest/run.py ramp      # puis rapid, soak, failover, stress, spike
 uv run python loadtest/summarize.py     # tableau Markdown de tous les tests, pour le rapport
 
-# À la fin : supprimer l'exception
+# À la fin : supprimer l'exception et rétablir le plafond par IP
 gcloud compute security-policies rules delete 950 --security-policy toxic-api-policy --quiet
+kubectl set env deployment/toxic-api MAX_IN_FLIGHT_PER_IP=4
 ```
 
 Résultats dans `loadtest/results/` : `<test>_stats.csv` (latences moyenne, P50/P95/P99, erreurs), `<test>_stats_history.csv` (évolution dans le temps), `<test>.html` (graphiques Locust, à joindre au rapport), `<test>_hpa.txt` (pods et CPU toutes les 15 s), `<test>_events.txt` (heure du failover).
@@ -318,6 +321,30 @@ Résultats dans `loadtest/results/` : `<test>_stats.csv` (latences moyenne, P50/
 - **Mode interactif** : `uv run locust -f loadtest/locustfile.py` puis http://localhost:8089 (choix libre du nombre d'utilisateurs, graphiques en direct).
 - **Attaque (étape 6)** : relancer `stress` **sans** l'exception Cloud Armor : les requêtes au-delà de 100/min reçoivent `429` et n'atteignent pas l'API.
 - **Coût** : `stress` et `ramp` peuvent monter jusqu'à `maxReplicas` pods (2 CPU et 2 Gi chacun). Le quota de CPU de la région peut bloquer avant : les pods en trop restent alors en `Pending`.
+
+## Pipeline CI/CD (GitHub Actions)
+
+Le workflow `.github/workflows/devsecops.yml` se lance à chaque push sur `main` et à chaque pull request. Ses 8 jobs tournent en parallèle ; un seul échec met la pipeline en échec et peut bloquer la fusion. Le workflow n'a que le droit de lire le dépôt, et les outils tournent en conteneur ou via `uvx`, à version fixée.
+
+| Job | Outil | Ce qu'il vérifie |
+|---|---|---|
+| `gitleaks` | gitleaks | Secrets (clés, mots de passe) dans le code et dans tout l'historique git |
+| `pip-audit` | pip-audit | Failles connues dans les versions exactes de `uv.lock` |
+| `bandit` | bandit | Failles dans le code Python (sévérité moyenne et plus) |
+| `ruff` | ruff | Style, bugs probables et règles de sécurité (config : `[tool.ruff]` dans `pyproject.toml`) |
+| `hadolint` | hadolint | Bonnes pratiques du `Dockerfile` |
+| `trivy-image` | trivy | Construit l'image (amd64) puis cherche des failles HIGH et CRITICAL (celles sans correctif disponible sont ignorées) |
+| `kubeconform` | kubeconform | Validité du manifeste `k8s/toxic-api.yaml` (mode strict ; les CRD GKE, sans schéma public, sont ignorés) |
+| `kube-linter` | kube-linter | Bonnes pratiques de sécurité du manifeste (non-root, système de fichiers en lecture seule, etc.) |
+
+Pour reproduire les contrôles Python en local :
+
+```bash
+uvx ruff check .
+uvx bandit -c pyproject.toml -r . -ll
+```
+
+Les exceptions assumées sont documentées là où elles sont déclarées : `[tool.ruff]` et `[tool.bandit]` dans `pyproject.toml` (par exemple `B615`, sans objet car l'image tourne en `HF_HUB_OFFLINE=1`), et les commentaires `# noqa`.
 
 ## Ajouter un modèle
 

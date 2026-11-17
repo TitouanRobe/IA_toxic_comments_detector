@@ -30,6 +30,9 @@ QUEUE_WAIT = Histogram(
     buckets=(0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20),
 )
 QUEUE_WAITING = Gauge("toxic_api_queue_waiting", "Requêtes en attente d'un créneau d'inférence")
+# Raisons bornées : ip_limit (429, trop de requêtes en cours pour une IP), full (503, file pleine),
+# evicted (503, éjectée de la file au profit d'une IP moins présente), timeout (503, attente trop longue).
+SHED = Counter("toxic_api_shed_total", "Requêtes refusées par délestage", ["reason"])
 TOXICITY_SCORE = Histogram(
     "toxic_api_toxicity_score", "Score de toxicité renvoyé (0-100)", ["model"],
     buckets=(10, 20, 30, 40, 50, 60, 70, 80, 90, 100),

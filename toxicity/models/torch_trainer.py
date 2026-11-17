@@ -115,7 +115,7 @@ def train(
     )
     # Pas de weight decay sur les biais et les LayerNorm (pratique standard).
     decay, no_decay = [], []
-    for name, p in module.named_parameters():
+    for p in module.parameters():
         if p.requires_grad:
             (no_decay if p.ndim < 2 else decay).append(p)
     optimizer = torch.optim.AdamW(

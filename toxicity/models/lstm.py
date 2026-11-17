@@ -134,5 +134,5 @@ class LstmToxicityModel(ToxicityModel):
         config = TrainConfig(**json.loads((directory / "train_config.json").read_text()))
         vocab = json.loads((directory / "vocab.json").read_text(encoding="utf-8"))
         model = cls(config, vocab=vocab)
-        model.module.load_state_dict(torch.load(directory / "model.pt", map_location="cpu"))
+        model.module.load_state_dict(torch.load(directory / "model.pt", map_location="cpu", weights_only=True))
         return model

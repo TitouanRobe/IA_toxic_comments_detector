@@ -47,31 +47,15 @@ Le texte est envoyé dans le corps de la requête (et non dans l'URL), pour ne p
 
 | Champ | Type | Description |
 |---|---|---|
-| `model` | string | Modèle utilisé |
-| `text` | string | Texte analysé (tel qu'envoyé) |
-| `is_toxic` | boolean | `true` si `toxicity_score` > 70 |
-| `toxicity_score` | number | Score de la classe `toxic`, de 0 à 100 (1 décimale) |
-| `classes` | object | Scores de 0 à 100 des autres classes : `severe_toxic`, `obscene`, `threat`, `insult`, `identity_hate` |
+| `is_toxic` | boolean | `true` si le score de la classe `toxic` est > 70 |
 
 ```json
-{
-  "model": "bert",
-  "text": "You are an idiot",
-  "is_toxic": true,
-  "toxicity_score": 96.4,
-  "classes": {
-    "severe_toxic": 3.1,
-    "obscene": 41.7,
-    "threat": 0.4,
-    "insult": 88.2,
-    "identity_hate": 1.2
-  }
-}
+{ "is_toxic": true }
 ```
 
-**Notes sur les scores**
+**Notes**
 
-- Les classes ne sont pas exclusives : un commentaire peut avoir plusieurs scores élevés (classification multi-label). Les scores ne totalisent donc pas 100.
+- Seule la décision est renvoyée, jamais les scores : des probabilités détaillées permettraient de copier le modèle (extraction) avec bien moins de requêtes.
 - `is_toxic` ne dépend que de la classe `toxic`. Le seuil (70) est fixé côté serveur.
 
 **Erreurs**
@@ -82,7 +66,9 @@ Le texte est envoyé dans le corps de la requête (et non dans l'URL), pour ne p
 | `422` | Corps invalide (`text` absent, vide ou de plus de 1500 caractères, JSON mal formé) | Détail de validation FastAPI |
 | `413` | Corps de requête de plus de 4096 octets | `{"detail": "Corps de requête trop volumineux (maximum 4096 octets)"}` |
 | `503` | Modèle connu mais non entraîné, donc absent de `artifacts/` | `{"detail": "Modèle 'laya' non entraîné : lancez train.py --model laya"}` |
-| `503` | Serveur surchargé (file d'attente pleine) : réessayer après le délai `Retry-After` | `{"detail": "Service surchargé, réessayer dans quelques secondes"}` |
+| `429` | Trop de requêtes simultanées depuis la même IP (plus de 4 en cours) : réessayer après `Retry-After` | `{"detail": "Trop de requêtes simultanées depuis cette adresse"}` |
+| `429` | Limite Cloud Armor : plus de 100 requêtes/min depuis la même IP (au-delà de 200/min, IP bannie 10 min) | Page d'erreur du load balancer |
+| `503` | Serveur surchargé (file d'attente pleine, ou requête retirée de la file au profit d'un autre client) : réessayer après le délai `Retry-After` | `{"detail": "Service surchargé, réessayer dans quelques secondes"}` |
 
 ## Exemples
 

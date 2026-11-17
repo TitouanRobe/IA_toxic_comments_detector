@@ -51,9 +51,11 @@ upsert_rule 900 \
 # --- Règle 1000 : limite de débit par IP AVEC ban temporaire -----------------------------------
 # conform (<= 100 req/60s par IP) : autorisé.
 # exceed (> 100 req/60s)          : 429.
-# ban (> 120 req/60s par IP)      : l'IP est BANNIE 600 s (toutes ses requêtes -> 429), même si
+# ban (> 200 req/60s par IP)      : l'IP est BANNIE 600 s (toutes ses requêtes -> 429), même si
 #                                   elle ralentit ensuite. C'est la différence avec un simple
 #                                   throttle : l'attaquant ne peut plus « pulser » sous le seuil.
+# Entre 100 et 200 req/min, l'IP est seulement limitée (429 sur l'excédent) : un client un peu
+# trop rapide (rafale, réessais après 503) n'est pas banni 10 min pour un écart ponctuel.
 upsert_rule 1000 \
   --src-ip-ranges "*" \
   --action rate-based-ban \
@@ -62,10 +64,10 @@ upsert_rule 1000 \
   --rate-limit-threshold-interval-sec 60 \
   --exceed-action deny-429 \
   --conform-action allow \
-  --ban-threshold-count 120 \
+  --ban-threshold-count 200 \
   --ban-threshold-interval-sec 60 \
   --ban-duration-sec 600 \
-  --description "Rate limit par IP + ban temporaire 600s au-dela de 120 req/60s"
+  --description "Rate limit par IP + ban temporaire 600s au-dela de 200 req/60s"
 
 echo "OK. Règles de la policy $POLICY :"
 gcloud compute security-policies describe "$POLICY" \

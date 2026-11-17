@@ -315,7 +315,7 @@ def svg_line_chart(series: list[tuple[str, list[float | None], str]], xlabels: l
         parts.append(f'<text x="{x(i):.0f}" y="{H-pad+18:.0f}" text-anchor="middle" '
                      f'fill="#666">{xlabels[i] if i < len(xlabels) else ""}</text>')
     # Courbes : un <polyline> par segment continu (coupé à chaque None -> vrai trou, pas de chute à 0).
-    for name, vals, color in series:
+    for _name, vals, color in series:
         segment: list[str] = []
         for i, v in enumerate(vals):
             if v is None:

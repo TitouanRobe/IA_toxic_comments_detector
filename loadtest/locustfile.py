@@ -71,9 +71,10 @@ class ApiUser(HttpUser):
                 # 429 = Cloud Armor (limite de débit), 502/503 = pod indisponible.
                 r.failure(f"HTTP {r.status_code}")
                 return
-            score = r.json().get("toxicity_score")
-            if not isinstance(score, (int, float)) or not 0 <= score <= 100:
-                r.failure(f"score invalide : {score!r}")
+            # L'API ne renvoie plus que la décision (pas de score, contre l'extraction du modèle).
+            is_toxic = r.json().get("is_toxic")
+            if not isinstance(is_toxic, bool):
+                r.failure(f"réponse invalide : is_toxic={is_toxic!r}")
 
 
 if SCENARIO:

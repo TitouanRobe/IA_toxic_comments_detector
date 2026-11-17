@@ -14,13 +14,13 @@ Usage (depuis la racine du projet) :
 import argparse
 import json
 import os
-import urllib.error
-import urllib.request
 import subprocess
 import sys
 import threading
 import time
 import tomllib
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import summarize

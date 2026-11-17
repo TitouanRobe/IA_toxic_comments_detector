@@ -1,0 +1,98 @@
+# Pipeline CI/CD de sécurité : chaque job échoue (et bloque la fusion) si son outil trouve un problème.
+# Les outils tournent dans des conteneurs ou via uvx, à version fixe : un résultat reproductible
+# en local avec la même commande.
+name: DevSecOps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Droits minimaux : la pipeline ne fait que lire le dépôt.
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 1. Secrets dans le code (tout l'historique git, pas seulement le dernier commit).
+  gitleaks:
+    name: Secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 \
+            detect --source /repo --no-banner --redact --verbose
+
+  # 2. Dépendances connues vulnérables, d'après uv.lock (les versions réellement installées).
+  pip-audit:
+    name: Dépendances (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: |
+          uv export --frozen --no-default-groups --no-emit-project --no-hashes -o requirements.txt
+          uvx pip-audit -r requirements.txt --no-deps --disable-pip
+
+  # 3. Analyse statique de sécurité du code Python.
+  bandit:
+    name: Analyse statique (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx bandit -c pyproject.toml -r . -ll
+
+  # 4. Lint (règles de style, de bugs probables et de sécurité, voir [tool.ruff] dans pyproject.toml).
+  ruff:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx ruff check . --output-format github
+
+  # 5. Lint du Dockerfile.
+  hadolint:
+    name: Dockerfile (hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
+
+  # 6. Scan de l'image Docker : construite comme en production (amd64), puis scannée.
+  trivy-image:
+    name: Image Docker (trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --platform linux/amd64 -t toxic-api:ci .
+      # --ignore-unfixed : on ne bloque pas sur une faille pour laquelle aucun correctif n'existe.
+      - run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 \
+            image --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln --exit-code 1 toxic-api:ci
+
+  # 7. Manifestes Kubernetes : validité du schéma (kubeconform), puis bonnes pratiques (kube-linter).
+  kubeconform:
+    name: Manifestes k8s (kubeconform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Les CRD GKE (ManagedCertificate, BackendConfig, SecretProviderClass...) n'ont pas de schéma
+      # dans le catalogue standard : ils sont ignorés, tout le reste est validé strictement.
+      - run: |
+          docker run --rm -v "$PWD/k8s:/k8s:ro" ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -ignore-missing-schemas -summary /k8s/toxic-api.yaml
+
+  kube-linter:
+    name: Manifestes k8s (kube-linter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD/k8s:/k8s:ro" stackrox/kube-linter:v0.7.1 lint /k8s/toxic-api.yaml

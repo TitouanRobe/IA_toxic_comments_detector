@@ -50,3 +50,28 @@ explicit = true
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
+
+# --- Qualité et sécurité du code (pipeline CI : .github/workflows/devsecops.yml) ---
+[tool.ruff]
+line-length = 120
+extend-exclude = ["artifacts", "old_artifacts", "results"]
+
+[tool.ruff.lint]
+# E/F : erreurs et pyflakes ; I : tri des imports ; B : bugs probables ; S : règles de sécurité
+# (équivalent bandit dans ruff) ; UP : syntaxe Python moderne.
+select = ["E", "F", "I", "B", "S", "UP"]
+# E501 : longueur des lignes (commentaires en français) ; E741 : variable `l` ; B905 : zip(strict=).
+ignore = ["E501", "E741", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts d'attaque et de test de charge : lancent des sous-processus et ouvrent des URL par
+# conception, le code n'est pas embarqué dans l'image de production.
+"loadtest/*" = ["S"]
+"attack/*" = ["S"]
+
+[tool.bandit]
+exclude_dirs = [".venv", "artifacts", "old_artifacts", "loadtest", "attack"]
+# B615 : from_pretrained() sans `revision`. Les modèles de base sont téléchargés uniquement à
+# l'entraînement (PRETRAINED dans toxicity/models/*.py) ; en production l'image fixe
+# HF_HUB_OFFLINE=1 et charge les poids depuis un volume, aucun appel au Hub n'est fait.
+skips = ["B615"]

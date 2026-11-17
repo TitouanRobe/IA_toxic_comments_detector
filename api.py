@@ -29,14 +29,16 @@ Variables d'environnement :
                      Évite que la première requête après un démarrage à froid paie le chargement.
   TORCH_NUM_THREADS  threads PyTorch ; à aligner sur le nombre de vCPU (défaut : torch décide).
   MAX_CONCURRENT_INFERENCES  inférences simultanées par pod (défaut : 1), les autres attendent.
-  MAX_QUEUE_LENGTH           requêtes en attente max par pod (défaut : 8) ; au-delà, 503 immédiat.
+  MAX_QUEUE_LENGTH           requêtes en attente max par pod (défaut : 8) ; file pleine : la
+                             requête de l'IP la plus présente est éjectée, ou la nouvelle refusée (503).
   INFERENCE_QUEUE_TIMEOUT    attente max en file (s, défaut : 2) avant une réponse 503.
+  MAX_IN_FLIGHT_PER_IP       requêtes /model en cours max par IP et par pod (défaut : 4) ; au-delà,
+                             429 immédiat avant toute lecture. 0 pour désactiver (test de charge).
   ENABLE_DOCS        "1" pour exposer /docs, /redoc et /openapi.json (défaut : désactivés).
   METRICS_PORT       port des métriques Prometheus (défaut : 8081, 0 pour désactiver),
                      interne au cluster, voir toxicity/metrics_prom.py.
 """
 
-import asyncio
 import hashlib
 import hmac
 import logging
@@ -56,6 +58,8 @@ from starlette.concurrency import run_in_threadpool
 from toxicity import audit_log, metrics_prom
 from toxicity.body_limit import BodySizeLimit
 from toxicity.config import ARTIFACTS_DIR, LABELS
+from toxicity.fair_queue import FairInferenceQueue
+from toxicity.ip_limit import PerIPInFlightLimit
 from toxicity.models.base import ToxicityModel
 from toxicity.models.registry import MODELS, get_model_class
 
@@ -76,7 +80,6 @@ MAX_TEXT_LENGTH = 1500  # caractères
 MAX_BODY_BYTES = 4096
 ENABLE_DOCS = os.environ.get("ENABLE_DOCS") == "1"
 _DOCS_PATHS = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
-OTHER_LABELS = [label for label in LABELS if label != "toxic"]
 
 _models: dict[str, ToxicityModel] = {}
 _lock = Lock()
@@ -95,12 +98,17 @@ MAX_CONCURRENT_INFERENCES = int(os.environ.get("MAX_CONCURRENT_INFERENCES", "1")
 #   sécurité si une inférence est anormalement lente, ex. texte long sur un pod chargé).
 MAX_QUEUE_LENGTH = int(os.environ.get("MAX_QUEUE_LENGTH", "8"))
 INFERENCE_QUEUE_TIMEOUT = float(os.environ.get("INFERENCE_QUEUE_TIMEOUT", "2"))
+# Une IP ne peut pas avoir plus de 4 requêtes /model en cours sur un pod : 1 en inférence + 3 en
+# file au pire, soit moins de la moitié de la file. Un client légitime, qui attend sa réponse avant
+# d'envoyer la suivante, n'en a qu'une. Au-delà : 429 immédiat (toxicity/ip_limit.py).
+MAX_IN_FLIGHT_PER_IP = int(os.environ.get("MAX_IN_FLIGHT_PER_IP", "4"))
 # La file est gérée dans la boucle asyncio, pas dans des threads : une requête en attente ne
 # bloque pas de thread. Avant, chaque requête en attente occupait un des 40 threads du pool de
 # FastAPI ; sous flood, ils étaient tous bloqués et même /health attendait un thread libre, d'où
 # des sondes en échec et un pod retiré du load balancer (service qui « flappe », vague 5).
-_inference_slots = asyncio.Semaphore(MAX_CONCURRENT_INFERENCES)
-_queue_length = 0  # requêtes en attente d'un créneau (un seul event loop : pas de verrou)
+# File équitable : pleine, elle éjecte une requête de l'IP qui spamme plutôt que de refuser le
+# nouvel arrivant (toxicity/fair_queue.py).
+_inference_queue = FairInferenceQueue(MAX_CONCURRENT_INFERENCES, MAX_QUEUE_LENGTH)
 
 # Textes de préchauffage : un court et un long (troncature à max_length), pour exercer tous les
 # chemins du modèle avant de recevoir du trafic.
@@ -204,6 +212,10 @@ app = FastAPI(
 # Ajouté AVANT le middleware de journalisation ci-dessous, donc placé à l'intérieur de celui-ci :
 # les refus 413 sont journalisés, comptés dans les métriques et reçoivent les en-têtes de sécurité.
 app.add_middleware(BodySizeLimit, max_bytes=MAX_BODY_BYTES)
+# Ajouté après BodySizeLimit, donc placé DEVANT lui (et devant l'auth et la file d'inférence) :
+# une IP qui a déjà trop de requêtes en cours est refusée (429) avant que son corps soit lu.
+# Toujours à l'intérieur du middleware de journalisation : ces refus sont journalisés.
+app.add_middleware(PerIPInFlightLimit, max_in_flight=MAX_IN_FLIGHT_PER_IP, paths={"/model"})
 
 
 @app.middleware("http")
@@ -272,11 +284,10 @@ class PredictionRequest(BaseModel):
 
 
 class Prediction(BaseModel):
-    model: str
-    text: str
+    # Uniquement la décision, jamais les scores : des probabilités renvoyées pour chaque texte
+    # permettent d'entraîner une copie du modèle avec bien moins de requêtes (extraction de
+    # modèle, constat de la vague 6). Le score reste calculé côté serveur (seuil, journal, métriques).
     is_toxic: bool  # basé uniquement sur la classe "toxic" (score > 70)
-    toxicity_score: float  # probabilité de la classe "toxic", entre 0 et 100
-    classes: dict[str, float]  # scores 0-100 des autres classes
 
 
 @app.get("/health")
@@ -286,24 +297,20 @@ async def health() -> dict:
     return {"status": "ok", "loaded_models": sorted(_models)}
 
 
-async def _acquire_inference_slot() -> bool:
-    """Attend un créneau d'inférence. False si la file du pod est pleine (refus immédiat) ou si
-    l'attente dépasse INFERENCE_QUEUE_TIMEOUT."""
-    global _queue_length
-    if _queue_length >= MAX_QUEUE_LENGTH:
-        return False
-    _queue_length += 1
+async def _acquire_inference_slot(request: Request) -> bool:
+    """Attend un créneau d'inférence. False si la requête est refusée (file pleine), éjectée au
+    profit d'une IP moins présente, ou si l'attente dépasse INFERENCE_QUEUE_TIMEOUT."""
+    ip = audit_log.client_ip(request) or "unknown"
     metrics_prom.QUEUE_WAITING.inc()
     start = time.perf_counter()
     try:
-        await asyncio.wait_for(_inference_slots.acquire(), INFERENCE_QUEUE_TIMEOUT)
-        return True
-    except TimeoutError:
-        return False
+        refusal = await _inference_queue.acquire(ip, INFERENCE_QUEUE_TIMEOUT)
     finally:
-        _queue_length -= 1
         metrics_prom.QUEUE_WAITING.dec()
         metrics_prom.QUEUE_WAIT.observe(time.perf_counter() - start)
+    if refusal:
+        metrics_prom.SHED.labels(refusal).inc()
+    return refusal is None
 
 
 @app.post("/model", response_model=Prediction, dependencies=[Depends(require_api_key)])
@@ -321,7 +328,7 @@ async def predict(req: PredictionRequest, request: Request) -> Prediction:
         except FileNotFoundError as e:
             raise HTTPException(503, str(e)) from e
     metrics_prom.TEXT_LENGTH.observe(len(text))
-    if not await _acquire_inference_slot():
+    if not await _acquire_inference_slot(request):
         raise HTTPException(503, "Service surchargé, réessayer dans quelques secondes",
                             headers={"Retry-After": "2"})
     try:
@@ -330,16 +337,10 @@ async def predict(req: PredictionRequest, request: Request) -> Prediction:
         # fin réelle de l'inférence (jamais deux inférences en même temps par créneau).
         with metrics_prom.INFERENCE_DURATION.labels(model).time():
             scores = (await run_in_threadpool(clf.predict_proba, [text]))[0]
-        probs = dict(zip(LABELS, scores))
     finally:
-        _inference_slots.release()
-    toxic_score = 100 * float(probs["toxic"])
+        _inference_queue.release()
+    toxic_score = 100 * float(dict(zip(LABELS, scores))["toxic"])
+    # Le score n'est conservé que côté serveur (journal pseudonymisé, métriques), jamais renvoyé.
     request.state.toxicity_score = round(toxic_score, 1)
     metrics_prom.TOXICITY_SCORE.labels(model).observe(toxic_score)
-    return Prediction(
-        model=model,
-        text=text,
-        is_toxic=toxic_score > TOXIC_THRESHOLD,
-        toxicity_score=round(toxic_score, 1),
-        classes={label: round(100 * float(probs[label]), 1) for label in OTHER_LABELS},
-    )
+    return Prediction(is_toxic=toxic_score > TOXIC_THRESHOLD)

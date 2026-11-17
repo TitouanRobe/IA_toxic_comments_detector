@@ -125,5 +125,5 @@ class LayaToxicityModel(ToxicityModel):
     def load(cls, directory: Path) -> "LayaToxicityModel":
         config = TrainConfig(**json.loads((directory / "train_config.json").read_text()))
         model = cls(config, source_dir=directory)
-        model.module.load_state_dict(torch.load(directory / "model.pt", map_location="cpu"))
+        model.module.load_state_dict(torch.load(directory / "model.pt", map_location="cpu", weights_only=True))
         return model

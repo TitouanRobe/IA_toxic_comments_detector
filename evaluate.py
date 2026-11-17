@@ -85,7 +85,7 @@ def main() -> None:
         try:
             import torch
             torch.cuda.empty_cache()
-        except Exception:
+        except Exception:  # noqa: S110 : pas de GPU / torch absent, rien à libérer
             pass
 
     if not reports:

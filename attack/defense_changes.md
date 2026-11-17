@@ -13,6 +13,7 @@
 | Groupe « Report Jungle » (volet taille) | Textes jusqu'à 5000 car. acceptés, alors que le modèle n'en lit que ~1500 | `MAX_TEXT_LENGTH` 1500 + filtre de taille au load balancer | §3 |
 | Professeur, vague 5 | Service instable (« flapping ») | `/health` et la file d'attente ne bloquent plus de thread | §8 |
 | Professeur, vague 6 (17/11) | DoS : 7712 requêtes acceptées en 92 s, latence ×11 ; extraction à 489/min ; en-têtes manquants ; API découverte via `/openapi.json` | Ban réellement déployé, délestage rapide (503), limite de corps (413), en-têtes, docs fermées | §8 |
+| Durcissement complémentaire (17/11) | Les scores renvoyés facilitent la copie du modèle ; une IP qui spamme remplit la file et fait refuser les autres clients | Réponse réduite au booléen, ban à 200 req/min, plafond par IP en middleware (429), file équitable qui éjecte le spammeur | §10 |
 
 Ce document fait suite à :
 - `attack/defense_analysis.md` — l'attaque du groupe « Report Jungle » contre nous (côté serveur :
@@ -53,11 +54,11 @@ repasse sous 100/min (ou « pulse »), il est de nouveau servi.
 |---|---|---|
 | `enforceOnKey` | `IP` | isole la source, pas la clé partagée |
 | rate-limit | 100 req / 60 s | conforme en dessous (`allow`), `deny(429)` au-dessus |
-| ban-threshold | 120 req / 60 s | seuil de bascule en ban |
+| ban-threshold | ~~120~~ **200** req / 60 s (relevé en §10) | seuil de bascule en ban |
 | **ban-duration** | **600 s** | l'IP est **bloquée 10 min**, même si elle ralentit ensuite |
 
 L'attaquant ne peut donc plus contourner la limite en pulsant juste sous le seuil : au-delà de
-120 req/min, il est banni 10 minutes d'un bloc. Le trafic légitime venant d'autres IP n'est pas
+200 req/min, il est banni 10 minutes d'un bloc. Le trafic légitime venant d'autres IP n'est pas
 affecté.
 
 > Note : Cloud Armor applique une durée de ban **fixe** par règle. Un ban « progressif »
@@ -215,7 +216,7 @@ redésactiver après (ils contiennent l'IP client en clair — RGPD) :
      AND timestamp>="DEBUT" AND timestamp<="FIN"' --format='value(jsonPayload.ip)' --limit 20000 \
      | sort | uniq -c | sort -rn | head -20
    ```
-4. Vérifier qu'une IP qui dépasse 120 req/min disparaît des logs de l'API pendant ~10 min (ban).
+4. Vérifier qu'une IP qui dépasse 200 req/min disparaît des logs de l'API pendant ~10 min (ban).
 5. Remplir le tableau ci-dessus et conclure sur l'efficacité.
 
 ---
@@ -320,7 +321,7 @@ et remplir la dernière colonne du tableau du §7 avec les mesures en production
 ### 8e. Pistes non traitées (si l'attaque est distribuée)
 
 Le ban par IP n'arrête pas une attaque répartie sur de nombreuses IP restant chacune sous
-120 req/min. Le délestage garde alors le service sain (requêtes acceptées rapides, surplus en
+200 req/min. Le délestage garde alors le service sain (requêtes acceptées rapides, surplus en
 `503`), mais la capacité reste celle des pods en place. Options, par coût croissant :
 - **plafond global Cloud Armor** (`--enforce-on-key ALL`, calé sur la capacité réelle) : protège
   le modèle, mais bloque tout le monde une fois atteint ;
@@ -337,10 +338,145 @@ Le ban par IP n'arrête pas une attaque répartie sur de nombreuses IP restant c
 
 | Fichier | Changement |
 |---|---|
-| `api.py` | `MAX_TEXT_LENGTH` 5000 → 1500 (+ justification) ; délestage rapide (file bornée, 2 s) ; file asynchrone ; limite de corps 413 ; en-têtes CSP/X-Frame-Options/Referrer-Policy ; docs fermées par défaut |
+| `api.py` | `MAX_TEXT_LENGTH` 5000 → 1500 (+ justification) ; délestage rapide (file bornée, 2 s) ; file asynchrone ; limite de corps 413 ; en-têtes CSP/X-Frame-Options/Referrer-Policy ; docs fermées par défaut ; **§10** : réponse réduite à `is_toxic`, file équitable, plafond par IP |
 | `toxicity/body_limit.py` | **nouveau** : limite de taille du corps HTTP (413), avec ou sans `Content-Length` |
-| `k8s/cloud-armor-setup.sh` | **nouveau** : ban IP 600 s + rejet corps > 4096 o ; crée la policy si absente, crée ou met à jour chaque règle |
-| `README.md` | création de la policy via le script (au lieu de l'ancien `throttle`) ; exception de test de charge déplacée en priorité 950 (900 = filtre de taille) |
-| `k8s/toxic-api.yaml` | HPA `maxReplicas` 10 → 15 + métrique file d'attente (commentée) ; variables `MAX_QUEUE_LENGTH`, `INFERENCE_QUEUE_TIMEOUT`, `ENABLE_DOCS` |
-| `API.md`, `README.md` | doc alignée sur 1500 caractères ; codes `413` et `503` (surcharge) ; docs fermées par défaut |
+| `toxicity/fair_queue.py` | **nouveau (§10)** : file d'inférence bornée et équitable entre IP (éjection du spammeur) |
+| `toxicity/ip_limit.py` | **nouveau (§10)** : middleware, au plus 4 requêtes `/model` en cours par IP et par pod (429) |
+| `toxicity/metrics_prom.py` | **§10** : compteur `toxic_api_shed_total{reason}` des refus par délestage |
+| `k8s/cloud-armor-setup.sh` | **nouveau** : ban IP 600 s + rejet corps > 4096 o ; crée la policy si absente, crée ou met à jour chaque règle ; **§10** : seuil de ban 120 → 200 req/min |
+| `README.md` | création de la policy via le script (au lieu de l'ancien `throttle`) ; exception de test de charge déplacée en priorité 950 (900 = filtre de taille) ; **§10** : réponse booléenne, seuil 200, plafond par IP à lever pendant les tests de charge |
+| `k8s/toxic-api.yaml` | HPA `maxReplicas` 10 → 15 + métrique file d'attente (commentée) ; variables `MAX_QUEUE_LENGTH`, `INFERENCE_QUEUE_TIMEOUT`, `ENABLE_DOCS` ; **§10** : `MAX_IN_FLIGHT_PER_IP` |
+| `API.md`, `README.md` | doc alignée sur 1500 caractères ; codes `413` et `503` (surcharge) ; docs fermées par défaut ; **§10** : réponse `{"is_toxic": bool}`, codes `429` |
+| `loadtest/locustfile.py` | **§10** : vérifie `is_toxic` (booléen) au lieu de `toxicity_score` |
 | `attack/defense_changes.md` | **ce document** |
+
+---
+
+## 10. Durcissement complémentaire (17/11) : extraction du modèle et spam par IP
+
+### 10a. `/model` ne renvoie plus que la décision
+
+**Fichiers :** `api.py`, `API.md`, `README.md`, `loadtest/locustfile.py`.
+
+**Avant :**
+```json
+{ "model": "bert", "text": "...", "is_toxic": true, "toxicity_score": 96.4,
+  "classes": { "severe_toxic": 3.1, "obscene": 41.7, "threat": 0.4, "insult": 88.2, "identity_hate": 1.2 } }
+```
+**Après :**
+```json
+{ "is_toxic": true }
+```
+
+**Pourquoi.** L'audit de la vague 6 a montré que le modèle était extractible (489 requêtes/min).
+Six probabilités par texte sont une étiquette très riche : un attaquant entraîne une copie
+(« modèle substitut ») en imitant ces scores, avec bien moins de requêtes qu'avec une simple
+étiquette. Ne renvoyer que `is_toxic`, basé sur la seule classe `toxic` (score > 70), retire
+cette information : chaque requête n'apporte plus qu'**un bit**. Les champs `model` et `text`
+sont aussi retirés : le client les connaît déjà, et renvoyer le texte n'apportait rien.
+
+Le score reste calculé et conservé **côté serveur** : seuil de décision, journal d'accès
+(`toxicity_score`, pseudonymisé, sans le texte) et histogramme Prometheus. La supervision et
+l'analyse des attaques ne perdent rien.
+
+> Honnêteté sur l'impact : l'extraction reste possible à partir des seules étiquettes
+> (« label-only »), mais il faut beaucoup plus de requêtes pour la même fidélité, et les
+> limites de débit (§2, §10b, §10c) plafonnent ce nombre. C'est un frein, pas une
+> impossibilité. Changement **cassant** pour les clients qui lisaient `toxicity_score` ou `classes`.
+
+### 10b. Cloud Armor : ban à 200 req/min au lieu de 120
+
+**Fichiers :** `k8s/cloud-armor-setup.sh`, `README.md`.
+
+| Paramètre | Avant | Après |
+|---|---|---|
+| rate-limit (429 sur l'excédent) | 100 req / 60 s | 100 req / 60 s (inchangé) |
+| ban-threshold | 120 req / 60 s | **200 req / 60 s** |
+| ban-duration | 600 s | 600 s (inchangé) |
+
+**Pourquoi.** Avec 120, l'écart entre « limité » et « banni 10 min » n'était que de 20 requêtes :
+un client légitime un peu rapide (rafale, réessais automatiques après un `503`) passait presque
+directement au ban. Entre 100 et 200 req/min, une IP est désormais **limitée** (429 sur
+l'excédent) sans être bannie. Au-delà de 200, comportement de spam avéré : ban de 10 min.
+
+Ce relâchement est compensé dans l'API par le plafond par IP (§10c), qui coupe une rafale **dès
+la première seconde**, sans attendre qu'un seuil par minute soit atteint.
+
+### 10c. Plafond de requêtes simultanées par IP, en middleware devant le délestage
+
+**Fichiers :** `toxicity/ip_limit.py` (nouveau), `api.py`, `k8s/toxic-api.yaml`.
+
+Une IP ne peut pas avoir plus de **4 requêtes `/model` en cours** (en file ou en inférence) sur un
+même pod (`MAX_IN_FLIGHT_PER_IP`, défaut 4). Au-delà : **`429` immédiat** avec `Retry-After: 1`.
+
+Ordre de traitement d'une requête, après le changement :
+
+| # | Étape | Refus |
+|---|---|---|
+| 1 | Cloud Armor (load balancer) : corps > 4096 o, rate limit / ban par IP | 403, 429 |
+| 2 | Middleware journal + en-têtes de sécurité | — |
+| 3 | **Plafond par IP (nouveau)** | **429** |
+| 4 | Limite de taille du corps | 413 |
+| 5 | Parsing JSON, validation, contrôle de clé | 422, 401 |
+| 6 | File d'inférence équitable (§10d) | 503 |
+| 7 | Inférence | — |
+
+**Pourquoi devant.** Le middleware est placé **avant** la lecture du corps, le parsing JSON, le
+contrôle de clé et la file d'inférence : une requête de spam est refusée sans coûter de CPU et
+sans prendre de place dans la file. Il reste **à l'intérieur** du middleware de journalisation :
+les `429` sont journalisés (avec l'IP pseudonymisée) et comptés dans les métriques.
+
+**Pourquoi 4.** Un client légitime attend sa réponse avant d'envoyer la suivante : il a 1 requête
+en cours. Avec 4, une IP occupe au pire 1 inférence + 3 places sur les 8 de la file, soit moins de
+la moitié. Le plafond est **par pod** : derrière le load balancer, une IP est répartie entre les pods.
+
+**Complémentarité avec Cloud Armor.** Cloud Armor compte des requêtes **par minute** au load
+balancer ; le middleware compte des requêtes **en cours** sur chaque pod. Une rafale de 100
+requêtes simultanées passe sous le seuil de 200/min mais est coupée ici dès la 5e.
+
+> Limite : pendant un test de charge depuis une seule machine (Locust, 120 utilisateurs), ce
+> plafond renverrait des `429`. Le lever le temps du test : `kubectl set env
+> deployment/toxic-api MAX_IN_FLIGHT_PER_IP=0`, puis le remettre à 4 (procédure dans `README.md`).
+
+### 10d. File d'attente bornée et équitable : on éjecte le spammeur, pas le nouvel arrivant
+
+**Fichiers :** `toxicity/fair_queue.py` (nouveau), `api.py`, `toxicity/metrics_prom.py`.
+
+**Avant (§8c, correction 2) :** file FIFO bornée à 8 requêtes par pod. File pleine : la
+**nouvelle** requête reçoit `503`, quelle que soit son IP. Une IP qui spamme remplissait donc la
+file et c'était les autres clients (souvent légitimes) qui étaient refusés.
+
+**Après :** la file reste bornée (8 en attente, 2 s d'attente max), mais elle tient le compte des
+requêtes en attente **par IP**. Quand elle est pleine :
+
+- si l'IP la plus présente dans la file y a **au moins 2 requêtes de plus** que l'IP du nouvel
+  arrivant, sa requête **la plus récente** est éjectée (`503`) et le nouvel arrivant prend la place ;
+- sinon, le nouvel arrivant est refusé (`503`), comme avant.
+
+Le seuil de 2 évite d'échanger sans fin deux IP à égalité. On éjecte la requête la plus récente
+du spammeur, celle qui a le moins attendu, pour que ses requêtes les plus anciennes ne soient pas
+perdues inutilement.
+
+Une requête qui obtient un créneau puis voit son client se déconnecter rend le créneau ; une
+requête qui expire ou est éjectée sort de la file. Aucune fuite de créneau.
+
+**Nouvelle métrique :** `toxic_api_shed_total{reason}`, avec `reason` ∈ `ip_limit` (429, §10c),
+`full` (503, file pleine), `evicted` (503, éjectée au profit d'une autre IP) et `timeout` (503).
+Elle permet de voir, pendant une attaque, si les refus visent bien l'attaquant (`ip_limit`,
+`evicted`) ou touchent tout le monde (`full`, `timeout`).
+
+### 10e. Validation locale
+
+Tests en local (BERT, CPU, `AUTH_DISABLED=1`, `TORCH_NUM_THREADS=1`) :
+
+| Test | Résultat |
+|---|---|
+| `POST /model` « You are an idiot » / « Have a nice day » | `{"is_toxic": true}` / `{"is_toxic": false}`, aucun score dans la réponse |
+| Rafale de 30 requêtes simultanées depuis la même IP | **4 × `200`, 26 × `429`** ; les 26 refus apparaissent dans le journal JSON |
+| File (test unitaire) : une IP occupe le créneau + 8 places, puis 3 autres IP arrivent | les 3 nouvelles IP sont servies ; 3 requêtes du spammeur éjectées (`evicted`) |
+| File : deux IP à égalité (4/4), une 5e requête de l'une d'elles | refusée (`full`), pas d'échange |
+| File : expiration (`timeout`) et client déconnecté pendant l'attente | créneau rendu, file vide, compteurs par IP à zéro |
+
+**Reste à faire :** redéployer (image + `bash k8s/cloud-armor-setup.sh`, commandes en §7),
+puis mesurer en production pendant la prochaine attaque : part des `429` applicatifs, répartition
+de `toxic_api_shed_total` par raison, et latence des clients légitimes pendant le spam.
