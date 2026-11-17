@@ -68,8 +68,9 @@ Justification mesurée :
 - Les modèles **tronquent à `max_length` = 256 tokens** (`toxicity/models/*.py`), soit
   ~1200–1500 caractères. **Au-delà, le texte est jeté par le tokenizer** et n'influence pas le
   score : accepter 5000 caractères n'apportait rien au modèle.
-- Distribution réelle du jeu de données (312 735 commentaires) : médiane 194 car., **p95 = 1319**,
-  p99 = 3508. **1500 caractères couvrent 96 % des commentaires réels.**
+- Distribution réelle du jeu de données : p95 = **1364** car. sur `train.csv` (159 571
+  commentaires) et **1274** sur `test.csv` (153 164) ; p99 ≈ 3500. **1500 caractères couvrent
+  95,8 % (train) et 96,2 % (test) des commentaires réels.**
 - Gain : la taille maximale d'entrée passe de 5000 à 1500 (**−70 %**), réduisant d'autant le coût
   réseau + parsing + tokenisation d'une requête surdimensionnée. Réponse `422` au-dessus.
 
@@ -84,9 +85,12 @@ Justification mesurée :
 `deny(403)` si `content-length > 4096` octets : un corps grossièrement surdimensionné est rejeté
 **avant** d'atteindre le pod (pas de CPU/mémoire consommés à le recevoir/parser).
 
-> Limite connue : contournable en `Transfer-Encoding: chunked` (pas de `Content-Length`). C'est
-> pourquoi la vérification applicative (§3a, `422`) reste le garde-fou **fiable** ; la règle LB
-> coupe juste le gros du trafic trivialement surdimensionné au plus tôt. Cloud Armor n'autorise
+> Limite connue : contournable en `Transfer-Encoding: chunked` (pas de `Content-Length`). La
+> validation applicative (§3a, `422`) ne compense **pas** ce cas : FastAPI lit et parse le corps
+> entier **avant** de le valider (et avant même le contrôle de clé, `401`), et uvicorn n'impose
+> aucune taille maximale. Un corps chunked énorme est donc reçu en entier par le pod. Correction
+> nécessaire : une limite de taille dans l'application, qui compte les octets reçus et répond
+> `413` dès le dépassement (à implémenter). Cloud Armor n'autorise
 > pas `deny(413)`, d'où le `403`.
 
 ---
@@ -178,7 +182,8 @@ redésactiver après (ils contiennent l'IP client en clair — RGPD) :
 | Fichier | Changement |
 |---|---|
 | `api.py` | `MAX_TEXT_LENGTH` 5000 → 1500 (+ justification) |
-| `k8s/cloud-armor-setup.sh` | **nouveau** : ban IP 600 s + rejet corps > 4096 o |
+| `k8s/cloud-armor-setup.sh` | **nouveau** : ban IP 600 s + rejet corps > 4096 o ; crée la policy si absente, crée ou met à jour chaque règle |
+| `README.md` | création de la policy via le script (au lieu de l'ancien `throttle`) ; exception de test de charge déplacée en priorité 950 (900 = filtre de taille) |
 | `k8s/toxic-api.yaml` | HPA `maxReplicas` 10 → 15 + métrique file d'attente (commentée) |
 | `API.md`, `README.md` | doc alignée sur 1500 caractères |
 | `attack/defense_changes.md` | **ce document** |

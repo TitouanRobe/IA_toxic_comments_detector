@@ -148,12 +148,9 @@ IP=$(gcloud compute addresses describe toxic-api-ip --global --format 'value(add
 # Avec un domaine à soi : DOMAIN=api.mondomaine.fr et un enregistrement A vers $IP.
 DOMAIN=$IP.sslip.io; echo $DOMAIN
 
-# Cloud Armor : 100 requêtes / minute / IP, au-delà réponse 429
-gcloud compute security-policies create toxic-api-policy
-gcloud compute security-policies rules create 1000 --security-policy toxic-api-policy \
-  --src-ip-ranges "*" --action throttle \
-  --rate-limit-threshold-count 100 --rate-limit-threshold-interval-sec 60 \
-  --conform-action allow --exceed-action deny-429 --enforce-on-key IP
+# Cloud Armor (politique "toxic-api-policy", relançable) : 100 requêtes / minute / IP puis 429,
+# IP bannie 10 min au-delà de 120 req/min, corps de plus de 4096 octets rejetés (403).
+bash k8s/cloud-armor-setup.sh
 
 # Clé d'API : la clé est donnée au client (la noter, elle n'est affichée qu'ici) ;
 # seule son empreinte va dans Google Secret Manager (stocké en Europe).
@@ -296,9 +293,10 @@ Tous les réglages sont dans [loadtest/config.toml](loadtest/config.toml) : cibl
 ```bash
 printf '%s' "dss_..." > loadtest/.api_key   # une clé valide (make_api_key.py) ; fichier exclu de git
 
-# Cloud Armor limite à 100 requêtes/min/IP : exception temporaire pour la machine de test
+# Cloud Armor limite à 100 requêtes/min/IP et bannit au-delà de 120 : exception temporaire pour
+# la machine de test. Priorité 950 : après le filtre de taille (900), avant le ban (1000).
 MY_IP=$(curl -s https://ifconfig.me)
-gcloud compute security-policies rules create 900 --security-policy toxic-api-policy \
+gcloud compute security-policies rules create 950 --security-policy toxic-api-policy \
   --src-ip-ranges "$MY_IP/32" --action allow --description "test de charge (temporaire)"
 
 uv run python loadtest/run.py --list    # scénarios disponibles
@@ -307,7 +305,7 @@ uv run python loadtest/run.py ramp      # puis rapid, soak, failover, stress, sp
 uv run python loadtest/summarize.py     # tableau Markdown de tous les tests, pour le rapport
 
 # À la fin : supprimer l'exception
-gcloud compute security-policies rules delete 900 --security-policy toxic-api-policy --quiet
+gcloud compute security-policies rules delete 950 --security-policy toxic-api-policy --quiet
 ```
 
 Résultats dans `loadtest/results/` : `<test>_stats.csv` (latences moyenne, P50/P95/P99, erreurs), `<test>_stats_history.csv` (évolution dans le temps), `<test>.html` (graphiques Locust, à joindre au rapport), `<test>_hpa.txt` (pods et CPU toutes les 15 s), `<test>_events.txt` (heure du failover).
