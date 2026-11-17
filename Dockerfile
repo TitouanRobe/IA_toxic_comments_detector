@@ -35,6 +35,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------- Étape 2 : image finale ----------
 FROM python:3.12-slim
 
+# Correctifs de sécurité des paquets système (zlib, openssl...) parus depuis la publication de
+# l'image de base : sans cela, trivy (CI) échoue sur toute faille corrigée par Debian mais pas
+# encore intégrée à python:3.12-slim.
+# hadolint ignore=DL3005
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Utilisateur non-root.
 RUN useradd --create-home --uid 1000 app
 

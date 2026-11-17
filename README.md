@@ -194,6 +194,17 @@ curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" \
   -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
 ```
 
+**API déployée** : IP publique `136.82.246.21`, soit le domaine `136.82.246.21.sslip.io` (voir `DOMAIN` ci-dessus).
+
+```bash
+DOMAIN=136.82.246.21.sslip.io
+curl https://$DOMAIN/health
+curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" \
+  -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
+```
+
+L'accès se fait **par le nom de domaine, en HTTPS** : `https://136.82.246.21/` (IP seule) échoue, car le certificat géré et l'Ingress sont liés au domaine et le port 80 est fermé.
+
 - **Nouvelle version** : nouveau `TAG`, build et push, puis la commande `sed … | kubectl apply` ci-dessus. Le changement de tag suffit à déclencher le déploiement (pas besoin de `rollout restart`). Retour arrière : relancer l'`apply` avec l'ancien `TAG`.
 - **Sans domaine** (test) : `kubectl port-forward svc/toxic-api 8080:80` puis `curl localhost:8080/health`. Le certificat géré ne s'active pas sans DNS valide.
 - **Autoscaling** : `kubectl get hpa toxic-api` montre la charge et le nombre de pods. Chaque pod charge ses propres modèles : un pod de plus = 2 CPU et 2 Gi facturés en plus.
@@ -352,3 +363,5 @@ Les exceptions assumées sont documentées là où elles sont déclarées : `[to
    Un modèle PyTorch peut réutiliser `toxicity/models/torch_trainer.py` ; un modèle scikit-learn implémente simplement `fit` / `predict_proba`.
 2. L'enregistrer dans `toxicity/models/registry.py`.
 3. `train.py --model <nom>` puis `compare.py`.
+
+
