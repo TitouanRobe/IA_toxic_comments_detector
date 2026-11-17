@@ -1,9 +1,18 @@
 # Étape 3 — Défenses mises en place (changements documentés)
 
 **Projet :** Digital Social Score — API de détection de toxicité.
-**Objet :** contre-mesures déployées après les attaques DoS de l'étape 2, et comment les valider.
-**Statut :** défenses implémentées ; mesure d'efficacité **à compléter** avec les prochaines
-attaques (section 7).
+**Objet :** contre-mesures déployées après les attaques subies, et comment les valider.
+**Statut :** défenses implémentées et validées en local (§8d) ; mesure en production
+**à compléter** après redéploiement et nouvelle attaque (§7).
+
+### Historique : attaque → constat → correction
+
+| Attaque | Constat principal | Correction | Section |
+|---|---|---|---|
+| Groupe « Report Jungle » (étape 2, 13/11) | 0 erreur côté serveur, mais un simple throttle laisse l'attaquant revenir dès qu'il ralentit | Ban par IP de 10 min (Cloud Armor) | §2 |
+| Groupe « Report Jungle » (volet taille) | Textes jusqu'à 5000 car. acceptés, alors que le modèle n'en lit que ~1500 | `MAX_TEXT_LENGTH` 1500 + filtre de taille au load balancer | §3 |
+| Professeur, vague 5 | Service instable (« flapping ») | `/health` et la file d'attente ne bloquent plus de thread | §8 |
+| Professeur, vague 6 (17/11) | DoS : 7712 requêtes acceptées en 92 s, latence ×11 ; extraction à 489/min ; en-têtes manquants ; API découverte via `/openapi.json` | Ban réellement déployé, délestage rapide (503), limite de corps (413), en-têtes, docs fermées | §8 |
 
 Ce document fait suite à :
 - `attack/defense_analysis.md` — l'attaque du groupe « Report Jungle » contre nous (côté serveur :
@@ -85,13 +94,17 @@ Justification mesurée :
 `deny(403)` si `content-length > 4096` octets : un corps grossièrement surdimensionné est rejeté
 **avant** d'atteindre le pod (pas de CPU/mémoire consommés à le recevoir/parser).
 
-> Limite connue : contournable en `Transfer-Encoding: chunked` (pas de `Content-Length`). La
-> validation applicative (§3a, `422`) ne compense **pas** ce cas : FastAPI lit et parse le corps
-> entier **avant** de le valider (et avant même le contrôle de clé, `401`), et uvicorn n'impose
-> aucune taille maximale. Un corps chunked énorme est donc reçu en entier par le pod. Correction
-> nécessaire : une limite de taille dans l'application, qui compte les octets reçus et répond
-> `413` dès le dépassement (à implémenter). Cloud Armor n'autorise
-> pas `deny(413)`, d'où le `403`.
+> Limite de cette règle : contournable en `Transfer-Encoding: chunked` (pas de `Content-Length`).
+> La validation applicative (§3a, `422`) ne compense **pas** ce cas : FastAPI lit et parse le
+> corps entier **avant** de le valider (et avant même le contrôle de clé, `401`), et uvicorn
+> n'impose aucune taille maximale. **Corrigé** par une limite de taille dans l'application, qui
+> compte les octets reçus et répond `413` dès le dépassement, avec ou sans `Content-Length`
+> (§8c, correction 4). Cloud Armor n'autorise pas `deny(413)`, d'où le `403` au load balancer.
+
+### 3c. Limite applicative du corps HTTP : 4096 octets (`413`)
+**Fichier :** `toxicity/body_limit.py` (ajoutée après la vague 6, détail en §8c). Même seuil que la
+règle Cloud Armor 900 : le load balancer coupe tôt les corps qui annoncent leur taille, l'API
+couvre ceux qui ne l'annoncent pas.
 
 ---
 
@@ -109,7 +122,8 @@ Justification mesurée :
 > Honnêteté sur l'impact : l'autoscaling est une défense **secondaire** contre un flood **court**
 > (un nouveau pod met 1–2 min à être prêt, il arrive après le pic). Il protège surtout contre une
 > charge **qui dure**. Les défenses primaires contre le DoS restent le ban d'IP (§2) et le
-> délestage `503` déjà en place (`INFERENCE_QUEUE_TIMEOUT` dans `api.py`).
+> délestage `503` (file bornée à 8 requêtes par pod, attente max 2 s depuis la vague 6, §8c).
+> La vague 6 l'a confirmé : attaque de 92 s, pods supplémentaires prêts en 1 à 2 min.
 
 ---
 
@@ -121,10 +135,11 @@ Ces mécanismes existaient déjà et nous ont protégés pendant l'attaque de l'
 
 | Mécanisme | Fichier | Rôle |
 |---|---|---|
-| Délestage `503` (file bornée + timeout) | `api.py` (`INFERENCE_QUEUE_TIMEOUT`) | un pod saturé refuse vite au lieu de s'effondrer |
+| Délestage `503` (file + timeout) | `api.py` (`INFERENCE_QUEUE_TIMEOUT`) | un pod saturé refuse au lieu de s'effondrer. **Insuffisant tel quel** : avec 20 s d'attente tolérée, le surplus était « accepté mais lent » (vague 6). Durci en §8c |
 | 1 inférence à la fois par pod | `api.py` (`MAX_CONCURRENT_INFERENCES`) | évite que N requêtes se disputent le CPU |
 | Authentification obligatoire sur `/model` | `api.py` (`require_api_key`) | pas d'inférence sans clé (401) |
-| Rate limit par IP (Cloud Armor) | policy `toxic-api-policy` | filtrage en amont, renforcé ici en ban |
+| Rate limit par IP (Cloud Armor) | policy `toxic-api-policy` | filtrage en amont, renforcé ici en ban (§2) |
+| En-têtes HSTS et `X-Content-Type-Options` | `api.py` (middleware) | déjà présents avant la vague 6 ; complétés par CSP, `X-Frame-Options`, `Referrer-Policy` (§8c) |
 
 ---
 
@@ -141,11 +156,25 @@ Ces mécanismes existaient déjà et nous ont protégés pendant l'attaque de l'
 
 ### Déployer
 ```bash
-# 1. Cloud Armor (ban IP + filtre taille) — déjà appliqué, réexécutable (idempotent)
-bash k8s/cloud-armor-setup.sh
+git pull
+REGION=europe-west1; PROJECT=<projet-gcp>; DOMAIN=<domaine>   # valeurs du déploiement en place
+TAG=$(date +%Y%m%d-%H%M); IMAGE=$REGION-docker.pkg.dev/$PROJECT/toxic/toxic-api:$TAG
+gcloud config set project $PROJECT
 
-# 2. API (MAX_TEXT_LENGTH) + HPA : rebuild image puis
-kubectl apply -f k8s/toxic-api.yaml
+# 1. Cloud Armor : ban IP + filtre de taille (crée ou met à jour, relançable)
+bash k8s/cloud-armor-setup.sh      # attendu : 900 deny(403), 1000 rate_based_ban 600
+
+# 2. Image puis déploiement
+gcloud auth configure-docker $REGION-docker.pkg.dev
+docker build --platform linux/amd64 -t $IMAGE . && docker push $IMAGE
+sed -e "s/REGION/$REGION/" -e "s/PROJECT_ID/$PROJECT/" -e "s/DOMAIN/$DOMAIN/" -e "s/IMAGE_TAG/$TAG/" \
+  k8s/toxic-api.yaml | kubectl apply -f -
+kubectl rollout status deployment/toxic-api
+
+# 3. Vérifications
+API=http://<ip-ou-domaine>
+curl -s -i $API/health | grep -iE "HTTP/|content-security|x-frame|strict-transport"   # 200 + en-têtes
+curl -s -o /dev/null -w "docs: %{http_code}\n" $API/docs                                  # 404
 ```
 
 ### Préparer la mesure
@@ -160,20 +189,34 @@ redésactiver après (ils contiennent l'IP client en clair — RGPD) :
 
 ### Tableau à remplir (avant / après défense)
 
-| Métrique | Avant (étape 2) | Après (à mesurer) |
-|---|---|---|
-| Taux d'erreur vu par l'attaquant | 79–100 % (429) | _à mesurer_ |
-| Erreurs côté backend (logs API) | 0 % | _à mesurer_ |
-| Latence p95 backend | 335 ms | _à mesurer_ |
-| IP attaquante bannie ? | non (throttle only) | _à vérifier dans les logs LB_ |
-| Corps > 4096 o rejetés au LB (403) ? | n/a | _à vérifier_ |
-| Textes > 1500 car. rejetés (422) ? | n/a (limite 5000) | _à vérifier_ |
+| Métrique | Étape 2 — Report Jungle (13/11) | Vague 6 — prof, avant corrections (17/11) | Après corrections (à mesurer) |
+|---|---|---|---|
+| Requêtes atteignant le modèle | 1085 en ~40 min | **7712 en 91,7 s** | _à mesurer_ |
+| Taux d'erreur vu par l'attaquant | 79–100 % (429) | faible (requêtes acceptées) | _à mesurer_ |
+| Latence p50 vue par l'attaquant | — | **1397 ms** (126 ms au repos) | _à mesurer_ |
+| Erreurs côté backend (logs API) | 0 % | _non relevé_ | _à mesurer_ |
+| Latence p95 backend | 335 ms | _non relevé_ | _à mesurer_ |
+| Extraction du modèle (requêtes/min) | — | 489/min | _à mesurer_ |
+| IP attaquante bannie ? | non (throttle) | non (throttle, ban non déployé) | _à vérifier dans les logs LB_ |
+| Refus rapides `503` (délestage) | 0 | 0 visible (attente jusqu'à 20 s) | _à mesurer_ |
+| Corps > 4096 o rejetés (403 LB / 413 API) ? | non | non | _à vérifier_ |
+| `/docs`, `/openapi.json` | exposés | exposés (point d'entrée de l'attaque) | `404` (vérifié en local) |
 
 ### Protocole suggéré
-1. Rejouer la **même** attaque qu'à l'étape 2 (`attack/dos.py` et/ou leur `attack.py`).
-2. Relever côté attaquant (codes HTTP, latence) **et** côté serveur (logs Cloud Logging + logs LB).
-3. Vérifier qu'une IP qui dépasse 120 req/min disparaît des logs ~10 min (ban actif).
-4. Remplir le tableau ci-dessus et conclure sur l'efficacité.
+1. Rejouer la **même** attaque (`attack/dos.py`, leur `attack.py`, ou nouvelle vague du prof),
+   depuis une machine distincte du serveur (voir la limite de mesure en §8d).
+2. Relever côté attaquant (codes HTTP, latence) **et** côté serveur : logs Cloud Logging de l'API
+   (`jsonPayload.status`, `jsonPayload.latency_ms`) et logs du load balancer (requêtes bloquées
+   par Cloud Armor).
+3. Compter les IP distinctes de l'attaque (champ `jsonPayload.ip`, pseudonymisé mais comparable)
+   pour savoir si l'attaque était distribuée :
+   ```bash
+   gcloud logging read 'resource.labels.container_name="toxic-api" AND jsonPayload.path="/model"
+     AND timestamp>="DEBUT" AND timestamp<="FIN"' --format='value(jsonPayload.ip)' --limit 20000 \
+     | sort | uniq -c | sort -rn | head -20
+   ```
+4. Vérifier qu'une IP qui dépasse 120 req/min disparaît des logs de l'API pendant ~10 min (ban).
+5. Remplir le tableau ci-dessus et conclure sur l'efficacité.
 
 ---
 
@@ -270,8 +313,23 @@ Fichiers : `attack/results/local-avant*`, `attack/results/local-apres*`.
 > clients contre l'autre groupe (`dos-palier-*`) : une partie de la latence mesurée y est
 > vraisemblablement due à notre propre client.
 
-**Reste à faire** : redéployer (image + `k8s/cloud-armor-setup.sh`) puis faire rejouer l'attaque
-(prof ou autre groupe) et remplir le tableau du §7 avec les mesures en production.
+**Reste à faire** : redéployer (image + `k8s/cloud-armor-setup.sh`, commandes en §7), activer
+les logs du load balancer le temps de l'attaque, faire rejouer l'attaque (prof ou autre groupe)
+et remplir la dernière colonne du tableau du §7 avec les mesures en production.
+
+### 8e. Pistes non traitées (si l'attaque est distribuée)
+
+Le ban par IP n'arrête pas une attaque répartie sur de nombreuses IP restant chacune sous
+120 req/min. Le délestage garde alors le service sain (requêtes acceptées rapides, surplus en
+`503`), mais la capacité reste celle des pods en place. Options, par coût croissant :
+- **plafond global Cloud Armor** (`--enforce-on-key ALL`, calé sur la capacité réelle) : protège
+  le modèle, mais bloque tout le monde une fois atteint ;
+- **capacité prête avant le pic** : `minReplicas` plus élevé pendant les périodes d'attaque, modèle
+  intégré à l'image (plutôt que lu depuis le bucket) pour démarrer plus vite, pods « ballon » de
+  basse priorité pour garder un nœud disponible ;
+- **scaling sur la file d'attente** (`toxic_api_queue_waiting`) plutôt que sur le CPU, qui
+  nécessite l'adaptateur de métriques custom de Google Managed Prometheus (§4) ;
+- **une clé d'API par client** (§1), pour limiter et révoquer par client.
 
 ---
 
