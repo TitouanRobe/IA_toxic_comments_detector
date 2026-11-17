@@ -1,0 +1,9 @@
+# Config gitleaks (détectée automatiquement à la racine du dépôt).
+title = "toxic-comments-detector"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Jeux de données : des centaines de Mo de CSV (commentaires publics), sans secret. Les scanner rend l'analyse de l'historique git extrêmement lente (plus de 10 min)."
+paths = ['''^data/''']
