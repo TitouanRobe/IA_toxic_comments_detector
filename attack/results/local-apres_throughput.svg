@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" width="760" height="380" font-family="sans-serif" font-size="13">
+<rect width="760" height="380" fill="white"/>
+<text x="380.0" y="26" text-anchor="middle" font-size="16" font-weight="bold">Débit et taux d'erreur sous charge</text>
+<line x1="60" y1="60" x2="700" y2="60" stroke="#eee"/><text x="52" y="64" text-anchor="end" fill="#666">168</text>
+<line x1="60" y1="112" x2="700" y2="112" stroke="#eee"/><text x="52" y="116" text-anchor="end" fill="#666">135</text>
+<line x1="60" y1="164" x2="700" y2="164" stroke="#eee"/><text x="52" y="168" text-anchor="end" fill="#666">101</text>
+<line x1="60" y1="216" x2="700" y2="216" stroke="#eee"/><text x="52" y="220" text-anchor="end" fill="#666">67</text>
+<line x1="60" y1="268" x2="700" y2="268" stroke="#eee"/><text x="52" y="272" text-anchor="end" fill="#666">34</text>
+<line x1="60" y1="320" x2="700" y2="320" stroke="#eee"/><text x="52" y="324" text-anchor="end" fill="#666">0</text>
+<text x="18" y="190.0" text-anchor="middle" fill="#666" transform="rotate(-90 18 190.0)">req/s  &amp;  % erreurs</text>
+<text x="380.0" y="368" text-anchor="middle" fill="#666">temps (s)</text>
+<text x="60" y="338" text-anchor="middle" fill="#666">0</text>
+<text x="126" y="338" text-anchor="middle" fill="#666">3</text>
+<text x="192" y="338" text-anchor="middle" fill="#666">6</text>
+<text x="259" y="338" text-anchor="middle" fill="#666">9</text>
+<text x="325" y="338" text-anchor="middle" fill="#666">12</text>
+<text x="391" y="338" text-anchor="middle" fill="#666">15</text>
+<text x="457" y="338" text-anchor="middle" fill="#666">18</text>
+<text x="523" y="338" text-anchor="middle" fill="#666">21</text>
+<text x="590" y="338" text-anchor="middle" fill="#666">24</text>
+<text x="656" y="338" text-anchor="middle" fill="#666">27</text>
+<polyline points="60.0,83.6 82.1,236.6 104.1,244.3 126.2,241.2 148.3,231.9 170.3,236.6 192.4,230.4 214.5,231.9 236.6,242.8 258.6,242.8 280.7,235.0 302.8,238.1 324.8,225.8 346.9,239.7 369.0,231.9 391.0,233.5 413.1,244.3 435.2,233.5 457.2,233.5 479.3,231.9 501.4,236.6 523.4,235.0 545.5,227.3 567.6,242.8 589.7,231.9 611.7,236.6 633.8,227.3 655.9,227.3 677.9,227.3 700.0,241.2" fill="none" stroke="#16a34a" stroke-width="2"/>
+<polyline points="60.0,306.9 82.1,320.0 104.1,320.0 126.2,320.0 148.3,317.2 170.3,314.3 192.4,317.4 214.5,320.0 236.6,320.0 258.6,320.0 280.7,320.0 302.8,320.0 324.8,320.0 346.9,320.0 369.0,320.0 391.0,320.0 413.1,320.0 435.2,320.0 457.2,320.0 479.3,320.0 501.4,320.0 523.4,320.0 545.5,317.4 567.6,320.0 589.7,320.0 611.7,320.0 633.8,312.3 655.9,312.3 677.9,317.4 700.0,316.9" fill="none" stroke="#dc2626" stroke-width="2"/>
+<rect x="550" y="56" width="12" height="12" fill="#16a34a"/><text x="568" y="66" fill="#333">débit (req/s)</text>
+<rect x="550" y="76" width="12" height="12" fill="#dc2626"/><text x="568" y="86" fill="#333">taux d'erreur (%)</text>
+</svg>

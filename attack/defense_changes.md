@@ -177,13 +177,112 @@ redésactiver après (ils contiennent l'IP client en clair — RGPD) :
 
 ---
 
-## 8. Récapitulatif des fichiers modifiés
+## 8. Retour d'attaque — audit du professeur (vague 6) et corrections
+
+### 8a. Ce que l'audit a trouvé
+
+Cible : `http://136.82.246.21` (`POST /model`), 4 constats :
+
+| Gravité | Constat |
+|---|---|
+| HIGH | DoS sur `/model` (découvert via `/openapi.json`) : **7712 requêtes acceptées en 91,7 s** (~84 req/s), latence p50 **1397 ms** contre 126 ms au repos (×11) |
+| MEDIUM | Modèle extractible mais freiné : 30 échantillons en 4 s puis 429 en masse, extraction réduite à 489/min |
+| MEDIUM | En-têtes manquants (HSTS, CSP, X-Frame-Options, X-Content-Type-Options) |
+| — | Service instable (« flapping ») pendant la vague 5 |
+
+### 8b. Analyse des causes
+
+1. **Le ban par IP n'était pas déployé.** Sur le projet GCP qui héberge l'API, la policy était
+   restée à l'ancienne règle `throttle` (100 req/min/IP, sans ban ni filtre de taille) :
+   `k8s/cloud-armor-setup.sh` n'y avait jamais été exécuté, et il échouait sur un projet neuf
+   (il ne faisait qu'un `rules update`). Avec un simple throttle, chaque IP garde 100 req/min
+   indéfiniment : 489/min d'extraction ≈ 5 IP × 100/min.
+2. **La latence ×11 est de l'attente en file, pas une inférence plus lente.** Une inférence à
+   la fois par pod ; au-delà de la capacité des 3 pods, les requêtes attendaient leur tour
+   jusqu'à **20 s** (`INFERENCE_QUEUE_TIMEOUT`). Elles étaient donc « acceptées mais lentes » :
+   1397 ms ≈ une dizaine de requêtes devant soi.
+3. **L'autoscaling arrive trop tard pour un pic court.** Un nouveau pod met 1 à 2 min (nœud
+   Autopilot, chargement de BERT, préchauffage), l'attaque durait 92 s, et l'HPA réagit au CPU,
+   qui ne monte qu'une fois les pods saturés.
+4. **Cause du flapping (vague 5) : threads épuisés.** `/model` et `/health` étaient des fonctions
+   synchrones, exécutées dans le pool de 40 threads de FastAPI. Sous flood, les 40 threads étaient
+   bloqués jusqu'à 20 s dans la file d'inférence ; `/health` attendait un thread libre, les sondes
+   Kubernetes et le health check du load balancer échouaient, et le pod était retiré du trafic.
+5. **En-têtes : constat en partie inexact.** HSTS et `X-Content-Type-Options` étaient bien
+   renvoyés par l'API (vérifié sur `/health`). L'audit a vraisemblablement lu les réponses `429`,
+   générées par Cloud Armor au load balancer, qui ne passent pas par l'API. CSP et
+   `X-Frame-Options` manquaient réellement. HSTS est de toute façon sans effet en HTTP simple.
+
+### 8c. Corrections
+
+| # | Correction | Fichier |
+|---|---|---|
+| 1 | Script Cloud Armor utilisable sur un projet neuf (crée la policy et les règles, ou les met à jour) ; README aligné (plus d'ancien `throttle`) | `k8s/cloud-armor-setup.sh`, `README.md` |
+| 2 | **Délestage rapide** : au plus 8 requêtes en attente par pod (`MAX_QUEUE_LENGTH`), puis `503` immédiat ; attente max 20 s → **2 s** | `api.py`, `k8s/toxic-api.yaml` |
+| 3 | **File d'attente asynchrone** : `/model`, `/health` et le contrôle de clé ne bloquent plus de thread ; seule l'inférence tourne dans un thread. `/health` répond même sous flood | `api.py` |
+| 4 | **Limite de taille du corps** (413 au-delà de 4096 octets) vérifiée avant lecture, y compris sans `Content-Length` (chunked), avant parsing JSON et contrôle de clé | `toxicity/body_limit.py`, `api.py` |
+| 5 | En-têtes `Content-Security-Policy`, `X-Frame-Options`, `Referrer-Policy` ajoutés | `api.py` |
+| 6 | `/docs`, `/redoc`, `/openapi.json` **fermés en production** (`ENABLE_DOCS=1` pour les ouvrir en local) | `api.py`, `k8s/toxic-api.yaml` |
+
+> Compromis assumé (correction 2) : sous une charge supérieure à la capacité, l'attaquant voit
+> davantage de `503` au lieu d'une latence élevée. C'est voulu : les requêtes acceptées restent
+> rapides, le pod reste sain, et le surplus est refusé en quelques millisecondes au lieu
+> d'occuper le serveur. La disponibilité face à une attaque **distribuée** (beaucoup d'IP, chacune
+> sous le seuil de ban) reste bornée par la capacité des pods : c'est la limite du ban par IP.
+
+### 8d. Validation locale (avant / après, même charge)
+
+**Protocole.** Même machine, même modèle (BERT, CPU, `TORCH_NUM_THREADS=1` pour rapprocher le
+temps d'inférence de la production), même tir : `attack/dos.py`, 100 clients simultanés pendant
+30 s, texte de 1400 caractères. « Avant » = `api.py` avant ces corrections ; « après » = version
+actuelle. Une sonde `curl` (processus séparé) interroge `/health` chaque seconde pendant la
+charge. Latences **côté serveur** lues dans le journal JSON de l'API (`latency_ms`).
+Fichiers : `attack/results/local-avant*`, `attack/results/local-apres*`.
+
+| Mesure | Avant | Après |
+|---|---|---|
+| Requêtes traitées (200) | 1729 (100 %) | 1720 (98,5 %) |
+| Refus rapides (503) | 0 | 26 (p50 **10 ms**) |
+| Latence serveur des 200 — p50 | **1741 ms** | **74 ms** |
+| Latence serveur des 200 — p95 | 1927 ms | 124 ms |
+| Latence serveur des 200 — max | 2254 ms | 207 ms |
+| `/health` pendant la charge | **620 – 830 ms** | **2 – 12 ms** |
+| Requête `/model` d'un client tiers pendant la charge | — | 17 – 119 ms (`local-apres_sonde-model.txt`) |
+| Corps de 6000 octets (avec / sans Content-Length) | lu et parsé en entier | `413` avant lecture |
+| `/docs`, `/openapi.json` | exposés | `404` |
+
+**Lecture.**
+- Le débit utile est **identique** (même capacité CPU) : la correction ne fabrique pas de
+  capacité, elle change **qui attend**. Avant, toutes les requêtes faisaient la queue (×24 en
+  latence) ; après, les requêtes acceptées restent proches du temps d'inférence et le surplus est
+  refusé en ~10 ms.
+- `/health` : 0,6–0,8 s avant, alors que l'inférence locale ne dure que ~20 ms. En production
+  (inférence ~6× plus longue, attente tolérée 20 s), cette attente dépassait le délai de la sonde
+  de readiness (1 s par défaut) : pod déclaré « non prêt », retiré du load balancer, puis remis —
+  c'est le mécanisme du flapping de la vague 5. Après : quelques millisecondes, sous charge.
+
+> **Limite de la mesure.** La latence vue par `dos.py` lui-même reste élevée dans la version
+> « après » (p50 ~1,3 s), alors qu'un client tiers est servi en < 120 ms au même moment : c'est
+> le **client** qui sature. Un seul processus Python qui maintient 100 requêtes simultanées, sur
+> la même machine que le serveur, plafonne vers ~55 req/s ; ses requêtes attendent dans le client
+> avant même d'être envoyées. Pour une mesure côté attaquant fiable, lancer le tir depuis une
+> autre machine (ou plusieurs processus). Ce biais existe aussi dans nos tirs à 1000 et 2000
+> clients contre l'autre groupe (`dos-palier-*`) : une partie de la latence mesurée y est
+> vraisemblablement due à notre propre client.
+
+**Reste à faire** : redéployer (image + `k8s/cloud-armor-setup.sh`) puis faire rejouer l'attaque
+(prof ou autre groupe) et remplir le tableau du §7 avec les mesures en production.
+
+---
+
+## 9. Récapitulatif des fichiers modifiés
 
 | Fichier | Changement |
 |---|---|
-| `api.py` | `MAX_TEXT_LENGTH` 5000 → 1500 (+ justification) |
+| `api.py` | `MAX_TEXT_LENGTH` 5000 → 1500 (+ justification) ; délestage rapide (file bornée, 2 s) ; file asynchrone ; limite de corps 413 ; en-têtes CSP/X-Frame-Options/Referrer-Policy ; docs fermées par défaut |
+| `toxicity/body_limit.py` | **nouveau** : limite de taille du corps HTTP (413), avec ou sans `Content-Length` |
 | `k8s/cloud-armor-setup.sh` | **nouveau** : ban IP 600 s + rejet corps > 4096 o ; crée la policy si absente, crée ou met à jour chaque règle |
 | `README.md` | création de la policy via le script (au lieu de l'ancien `throttle`) ; exception de test de charge déplacée en priorité 950 (900 = filtre de taille) |
-| `k8s/toxic-api.yaml` | HPA `maxReplicas` 10 → 15 + métrique file d'attente (commentée) |
-| `API.md`, `README.md` | doc alignée sur 1500 caractères |
+| `k8s/toxic-api.yaml` | HPA `maxReplicas` 10 → 15 + métrique file d'attente (commentée) ; variables `MAX_QUEUE_LENGTH`, `INFERENCE_QUEUE_TIMEOUT`, `ENABLE_DOCS` |
+| `API.md`, `README.md` | doc alignée sur 1500 caractères ; codes `413` et `503` (surcharge) ; docs fermées par défaut |
 | `attack/defense_changes.md` | **ce document** |

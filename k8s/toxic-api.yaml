@@ -110,6 +110,15 @@ spec:
               value: "bert,lstm"
             - name: TORCH_NUM_THREADS # à aligner sur resources.requests.cpu
               value: "2"
+            # Délestage rapide (voir api.py) : au plus 8 requêtes en attente par pod, 2 s d'attente
+            # max ; au-delà, 503 immédiat plutôt qu'une latence qui explose sous flood.
+            - name: MAX_QUEUE_LENGTH
+              value: "8"
+            - name: INFERENCE_QUEUE_TIMEOUT
+              value: "2"
+            # /docs et /openapi.json fermés en production (ne pas exposer la carte de l'API).
+            - name: ENABLE_DOCS
+              value: "0"
             # Empreintes des clés, fichier monté depuis Secret Manager (volume "api-keys" ci-dessous).
             # Secret absent ou accès refusé : le pod ne démarre pas.
             - name: API_KEY_HASHES_FILE

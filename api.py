@@ -1,13 +1,14 @@
 """API FastAPI d'inférence de toxicité.
 
 Lancement (clé et empreinte générées par make_api_key.py) :
-  API_KEY_HASHES=<empreinte> uv run uvicorn api:app --reload
+  ENABLE_DOCS=1 API_KEY_HASHES=<empreinte> uv run uvicorn api:app --reload
 Exemple :
   curl -X POST http://127.0.0.1:8000/model -H "Content-Type: application/json" \\
        -H "X-API-Key: <clé>" -d '{"text": "You are an idiot", "model": "bert"}'
 Le texte est envoyé dans le corps (POST) et non dans l'URL, pour qu'il ne
 se retrouve pas dans les logs d'accès, proxys ou historiques. Il n'est jamais stocké.
-Documentation interactive : http://127.0.0.1:8000/docs (bouton "Authorize" pour la clé)
+Documentation interactive : http://127.0.0.1:8000/docs (bouton "Authorize" pour la clé),
+uniquement avec ENABLE_DOCS=1 (désactivée par défaut, donc en production).
 
 Authentification : header X-API-Key, obligatoire sur /model. /health reste public
 (sondes Kubernetes et health check du load balancer).
@@ -28,11 +29,14 @@ Variables d'environnement :
                      Évite que la première requête après un démarrage à froid paie le chargement.
   TORCH_NUM_THREADS  threads PyTorch ; à aligner sur le nombre de vCPU (défaut : torch décide).
   MAX_CONCURRENT_INFERENCES  inférences simultanées par pod (défaut : 1), les autres attendent.
-  INFERENCE_QUEUE_TIMEOUT    attente max en file (s, défaut : 20) avant une réponse 503.
+  MAX_QUEUE_LENGTH           requêtes en attente max par pod (défaut : 8) ; au-delà, 503 immédiat.
+  INFERENCE_QUEUE_TIMEOUT    attente max en file (s, défaut : 2) avant une réponse 503.
+  ENABLE_DOCS        "1" pour exposer /docs, /redoc et /openapi.json (défaut : désactivés).
   METRICS_PORT       port des métriques Prometheus (défaut : 8081, 0 pour désactiver),
                      interne au cluster, voir toxicity/metrics_prom.py.
 """
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -41,14 +45,16 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from threading import BoundedSemaphore, Lock
+from threading import Lock
 
 import torch
 from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from toxicity import audit_log, metrics_prom
+from toxicity.body_limit import BodySizeLimit
 from toxicity.config import ARTIFACTS_DIR, LABELS
 from toxicity.models.base import ToxicityModel
 from toxicity.models.registry import MODELS, get_model_class
@@ -59,11 +65,17 @@ TOXIC_THRESHOLD = 70  # score "toxic" strictement supérieur à 70 -> toxique
 # caractères, voir toxicity/models/*.py) : au-delà, le texte est jeté par le tokenizer et
 # n'influe pas sur le score. Accepter 5000 n'apportait donc rien au modèle tout en offrant une
 # surface d'attaque (épuisement de ressources par entrées surdimensionnées, « sponge input » :
-# réseau + parsing + tokenisation). 1500 couvre 96 % des commentaires réels (p95 du jeu de
-# données = 1319 car.) et s'aligne sur ce que le modèle lit vraiment. La même limite est
-# appliquée en amont, au load balancer (Cloud Armor), pour rejeter les corps trop gros avant
-# qu'ils n'atteignent le pod : voir k8s/cloud-armor-setup.sh.
+# réseau + parsing + tokenisation). 1500 couvre ~96 % des commentaires réels (p95 = 1364 car.
+# sur train.csv, 1274 sur test.csv) et s'aligne sur ce que le modèle lit vraiment.
 MAX_TEXT_LENGTH = 1500  # caractères
+# Taille maximale du corps HTTP, vérifiée AVANT sa lecture (toxicity/body_limit.py, réponse 413).
+# 1500 caractères font ~1,5 Ko de JSON en ASCII ; 4096 laisse la marge pour l'UTF-8 multioctet et
+# les caractères échappés (é). Même seuil que la règle Cloud Armor 900, qui rejette les corps
+# trop gros au load balancer (k8s/cloud-armor-setup.sh) ; ici on couvre aussi les corps envoyés
+# sans Content-Length (chunked), que Cloud Armor ne voit pas.
+MAX_BODY_BYTES = 4096
+ENABLE_DOCS = os.environ.get("ENABLE_DOCS") == "1"
+_DOCS_PATHS = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
 OTHER_LABELS = [label for label in LABELS if label != "toxic"]
 
 _models: dict[str, ToxicityModel] = {}
@@ -74,10 +86,21 @@ _lock = Lock()
 # seule inférence à la fois (qui utilise déjà tous les threads PyTorch), les autres attendent
 # leur tour et chaque requête passe plus vite.
 MAX_CONCURRENT_INFERENCES = int(os.environ.get("MAX_CONCURRENT_INFERENCES", "1"))
-# Au-delà de ce temps d'attente, la requête est refusée (503) au lieu d'attendre indéfiniment :
-# le client peut réessayer, et un pod saturé ne s'enfonce pas (délestage de charge).
-INFERENCE_QUEUE_TIMEOUT = float(os.environ.get("INFERENCE_QUEUE_TIMEOUT", "20"))
-_inference_slots = BoundedSemaphore(MAX_CONCURRENT_INFERENCES)
+# Délestage de charge : au-delà de la capacité du pod, refuser VITE (503 + Retry-After) plutôt que
+# faire attendre. Avec une attente tolérée de 20 s (ancienne valeur), un flood restait « accepté
+# mais lent » : latence médiane ×11 mesurée par l'attaque de la vague 6. Deux bornes :
+# - MAX_QUEUE_LENGTH : nombre de requêtes en attente par pod. Pleine -> 503 immédiat, sans
+#   attendre. 8 requêtes à ~100 ms d'inférence = ~1 s d'attente au pire pour celles acceptées.
+# - INFERENCE_QUEUE_TIMEOUT : attente maximale d'une requête entrée dans la file (filet de
+#   sécurité si une inférence est anormalement lente, ex. texte long sur un pod chargé).
+MAX_QUEUE_LENGTH = int(os.environ.get("MAX_QUEUE_LENGTH", "8"))
+INFERENCE_QUEUE_TIMEOUT = float(os.environ.get("INFERENCE_QUEUE_TIMEOUT", "2"))
+# La file est gérée dans la boucle asyncio, pas dans des threads : une requête en attente ne
+# bloque pas de thread. Avant, chaque requête en attente occupait un des 40 threads du pool de
+# FastAPI ; sous flood, ils étaient tous bloqués et même /health attendait un thread libre, d'où
+# des sondes en échec et un pod retiré du load balancer (service qui « flappe », vague 5).
+_inference_slots = asyncio.Semaphore(MAX_CONCURRENT_INFERENCES)
+_queue_length = 0  # requêtes en attente d'un créneau (un seul event loop : pas de verrou)
 
 # Textes de préchauffage : un court et un long (troncature à max_length), pour exercer tous les
 # chemins du modèle avant de recevoir du trafic.
@@ -114,9 +137,9 @@ API_KEY_HASHES = _read_api_key_hashes()
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False, description="Clé d'API")
 
 
-def require_api_key(request: Request, key: str | None = Security(_api_key_header)) -> None:
+async def require_api_key(request: Request, key: str | None = Security(_api_key_header)) -> None:
     """Refuse la requête (401) si la clé est absente ou inconnue. Sinon, note le pseudonyme
-    du client pour le journal d'accès."""
+    du client pour le journal d'accès. Asynchrone (calcul immédiat) : ne consomme pas de thread."""
     if AUTH_DISABLED:
         request.state.client = "anonymous"
         return
@@ -170,7 +193,17 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Toxic comments detector", version="0.1.0", lifespan=lifespan)
+# Documentation et schéma OpenAPI désactivés par défaut : en production, ils donnaient à un
+# attaquant la carte complète de l'API (c'est par /openapi.json que /model a été trouvé, vague 6).
+app = FastAPI(
+    title="Toxic comments detector", version="0.1.0", lifespan=lifespan,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
+)
+# Ajouté AVANT le middleware de journalisation ci-dessous, donc placé à l'intérieur de celui-ci :
+# les refus 413 sont journalisés, comptés dans les métriques et reçoivent les en-têtes de sécurité.
+app.add_middleware(BodySizeLimit, max_bytes=MAX_BODY_BYTES)
 
 
 @app.middleware("http")
@@ -196,6 +229,13 @@ async def access_log_and_security_headers(request: Request, call_next):
     # Les réponses contiennent le texte analysé : aucun cache (navigateur, proxy) ne doit le garder.
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
+    # L'API ne renvoie que du JSON : aucune ressource à charger, aucune page à encadrer.
+    # Bloque l'inclusion dans une iframe (clickjacking) et toute exécution de contenu.
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    # Exception pour /docs (Swagger charge ses scripts depuis un CDN), qui n'existe qu'avec ENABLE_DOCS=1.
+    if not (ENABLE_DOCS and request.url.path in _DOCS_PATHS):
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
     return response
 
 
@@ -240,35 +280,57 @@ class Prediction(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict:
+async def health() -> dict:
+    # Asynchrone : répond même si tous les threads sont occupés par des inférences, pour que les
+    # sondes Kubernetes et le health check du load balancer ne déclarent pas un pod chargé « mort ».
     return {"status": "ok", "loaded_models": sorted(_models)}
 
 
+async def _acquire_inference_slot() -> bool:
+    """Attend un créneau d'inférence. False si la file du pod est pleine (refus immédiat) ou si
+    l'attente dépasse INFERENCE_QUEUE_TIMEOUT."""
+    global _queue_length
+    if _queue_length >= MAX_QUEUE_LENGTH:
+        return False
+    _queue_length += 1
+    metrics_prom.QUEUE_WAITING.inc()
+    start = time.perf_counter()
+    try:
+        await asyncio.wait_for(_inference_slots.acquire(), INFERENCE_QUEUE_TIMEOUT)
+        return True
+    except TimeoutError:
+        return False
+    finally:
+        _queue_length -= 1
+        metrics_prom.QUEUE_WAITING.dec()
+        metrics_prom.QUEUE_WAIT.observe(time.perf_counter() - start)
+
+
 @app.post("/model", response_model=Prediction, dependencies=[Depends(require_api_key)])
-def predict(req: PredictionRequest, request: Request) -> Prediction:
+async def predict(req: PredictionRequest, request: Request) -> Prediction:
     text, model = req.text, req.model
     # Pour le journal d'accès : la longueur du texte, jamais son contenu.
     request.state.model, request.state.text_length = model, len(text)
-    try:
-        clf = load_model(model)
-    except KeyError as e:
-        raise HTTPException(404, e.args[0]) from e
-    except FileNotFoundError as e:
-        raise HTTPException(503, str(e)) from e
+    # Modèle déjà chargé : accès direct. Sinon chargement (lent) dans un thread.
+    clf = _models.get(model)
+    if clf is None:
+        try:
+            clf = await run_in_threadpool(load_model, model)
+        except KeyError as e:
+            raise HTTPException(404, e.args[0]) from e
+        except FileNotFoundError as e:
+            raise HTTPException(503, str(e)) from e
     metrics_prom.TEXT_LENGTH.observe(len(text))
-    wait_start = time.perf_counter()
-    metrics_prom.QUEUE_WAITING.inc()
-    try:
-        acquired = _inference_slots.acquire(timeout=INFERENCE_QUEUE_TIMEOUT)
-    finally:
-        metrics_prom.QUEUE_WAITING.dec()
-    metrics_prom.QUEUE_WAIT.observe(time.perf_counter() - wait_start)
-    if not acquired:
+    if not await _acquire_inference_slot():
         raise HTTPException(503, "Service surchargé, réessayer dans quelques secondes",
-                            headers={"Retry-After": "5"})
+                            headers={"Retry-After": "2"})
     try:
+        # L'inférence (PyTorch, bloquante) tourne dans un thread pour ne pas figer la boucle
+        # asyncio. Non annulable : si le client se déconnecte, le créneau n'est libéré qu'à la
+        # fin réelle de l'inférence (jamais deux inférences en même temps par créneau).
         with metrics_prom.INFERENCE_DURATION.labels(model).time():
-            probs = dict(zip(LABELS, clf.predict_proba([text])[0]))
+            scores = (await run_in_threadpool(clf.predict_proba, [text]))[0]
+        probs = dict(zip(LABELS, scores))
     finally:
         _inference_slots.release()
     toxic_score = 100 * float(probs["toxic"])

@@ -35,16 +35,17 @@ uv run python predict.py --model bert "You are an idiot"
 # Comparaison des modèles entraînés
 uv run python compare.py
 
-# API d'inférence (documentation interactive : http://127.0.0.1:8000/docs)
+# API d'inférence (documentation interactive : http://127.0.0.1:8000/docs, avec ENABLE_DOCS=1 ;
+# désactivée par défaut et en production)
 uv run python make_api_key.py          # affiche une clé (pour le client) et son empreinte (pour l'API)
-API_KEY_HASHES=<empreinte> uv run uvicorn api:app --reload
+ENABLE_DOCS=1 API_KEY_HASHES=<empreinte> uv run uvicorn api:app --reload
 curl -X POST http://127.0.0.1:8000/model -H "Content-Type: application/json" \
      -H "X-API-Key: <clé>" -d '{"text": "You are an idiot", "model": "bert"}'
 ```
 
 ### Authentification (clé d'API)
 
-`POST /model` exige le header `X-API-Key`, sinon réponse `401`. `/health` reste public (sondes Kubernetes, health check du load balancer). Dans `/docs`, le bouton **Authorize** permet de saisir la clé.
+`POST /model` exige le header `X-API-Key`, sinon réponse `401`. `/health` reste public (sondes Kubernetes, health check du load balancer). Dans `/docs` (avec `ENABLE_DOCS=1`), le bouton **Authorize** permet de saisir la clé.
 
 - **Seules les empreintes sont stockées** : `make_api_key.py` génère une clé aléatoire (`dss_…`, 256 bits) et son empreinte SHA-256. Le client reçoit la clé, l'API ne connaît que l'empreinte (`API_KEY_HASHES`, ou le fichier `API_KEY_HASHES_FILE` monté depuis Secret Manager). Une fuite du secret ne donne donc aucune clé utilisable. Une clé mise par erreur à la place d'une empreinte fait échouer le démarrage.
 - **Une empreinte par client**, séparées par des virgules ou des retours à la ligne : on peut révoquer un seul client, ou garder ancienne et nouvelle clé pendant une rotation.
@@ -215,7 +216,9 @@ curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" \
   `printf '%s\n%s' "$EMPREINTE1" "$EMPREINTE2" | gcloud secrets versions add toxic-api-keys --data-file=-` puis `kubectl rollout restart deployment/toxic-api`.
   Les anciennes versions restent consultables et réactivables (`gcloud secrets versions list toxic-api-keys`).
 - `TORCH_NUM_THREADS` doit suivre `resources.requests.cpu` ; `PRELOAD_MODELS` (défaut `bert`) liste les modèles chargés **et préchauffés** au démarrage (une inférence factice avant que `/health` réponde : un nouveau pod ne reçoit du trafic qu'une fois rapide). Précharger `laya` rallonge le démarrage : augmenter alors `failureThreshold` de la `startupProbe`.
-- **File d'attente des inférences** : une seule inférence à la fois par pod (`MAX_CONCURRENT_INFERENCES=1`), les autres attendent leur tour ; au-delà de `INFERENCE_QUEUE_TIMEOUT` (20 s) d'attente, réponse `503` + `Retry-After` (délestage plutôt qu'un pod qui s'effondre).
+- **File d'attente des inférences** : une seule inférence à la fois par pod (`MAX_CONCURRENT_INFERENCES=1`), au plus `MAX_QUEUE_LENGTH` (8) requêtes en attente ; file pleine ou attente de plus de `INFERENCE_QUEUE_TIMEOUT` (2 s) : réponse `503` + `Retry-After` immédiate (délestage rapide plutôt qu'une latence qui explose). La file est gérée en asynchrone : une requête en attente n'occupe pas de thread, et `/health` répond même sous flood.
+- **Taille des requêtes** : corps limité à 4096 octets (`413`), vérifié avant lecture, y compris sans `Content-Length` ; `text` limité à 1500 caractères (`422`).
+- **En-têtes de sécurité** sur toutes les réponses de l'API : HSTS, `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`. `/docs` et `/openapi.json` fermés sauf `ENABLE_DOCS=1`.
 - Logs et état : `kubectl logs deploy/toxic-api` (journal JSON pseudonymisé), `kubectl get pods`.
 - Sans Docker en local : `gcloud builds submit --tag $IMAGE`.
 

@@ -4,7 +4,7 @@ API REST d'inférence qui prédit la toxicité d'un commentaire (FastAPI). Elle 
 
 - **Format** : JSON, encodage UTF-8
 - **Version** : 0.1.0
-- **Documentation interactive (Swagger)** : `/docs`, schéma OpenAPI : `/openapi.json`
+- **Documentation interactive (Swagger)** : `/docs`, schéma OpenAPI : `/openapi.json`. Uniquement si l'API est lancée avec `ENABLE_DOCS=1` (fermés par défaut, donc en production : `404`)
 - **Authentification** : aucune dans l'application. Sur Cloud Run, l'accès est géré par IAM (voir [Authentification](#authentification-cloud-run)).
 
 ## URL de base
@@ -80,7 +80,9 @@ Le texte est envoyé dans le corps de la requête (et non dans l'URL), pour ne p
 |---|---|---|
 | `404` | Modèle inconnu | `{"detail": "Modèle inconnu 'xyz'. Disponibles : bert, lstm, laya"}` |
 | `422` | Corps invalide (`text` absent, vide ou de plus de 1500 caractères, JSON mal formé) | Détail de validation FastAPI |
+| `413` | Corps de requête de plus de 4096 octets | `{"detail": "Corps de requête trop volumineux (maximum 4096 octets)"}` |
 | `503` | Modèle connu mais non entraîné, donc absent de `artifacts/` | `{"detail": "Modèle 'laya' non entraîné : lancez train.py --model laya"}` |
+| `503` | Serveur surchargé (file d'attente pleine) : réessayer après le délai `Retry-After` | `{"detail": "Service surchargé, réessayer dans quelques secondes"}` |
 
 ## Exemples
 
