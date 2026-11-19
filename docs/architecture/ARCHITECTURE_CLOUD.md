@@ -64,15 +64,15 @@ Le cadre « Zero trust appliqué » de la légende résume les règles valables 
 ### 3.1 Exposition et filtrage
 
 - **Load balancer HTTPS global (Ingress GKE)** avec IP statique et **certificat TLS géré par Google**. Point d'entrée unique de l'API : le reste du cluster n'a aucune adresse publique. Le certificat se renouvelle tout seul, ce qui supprime le risque d'expiration. L'en-tête HSTS oblige les navigateurs à rester en HTTPS.
-- **Cloud Armor** : politique de limitation de débit (100 requêtes par minute et par IP, au-delà `429`). Le trafic abusif (déni de service, force brute sur les clés, scans) est arrêté à la périphérie de Google, avant de consommer du CPU dans les pods. C'est la première barrière contre la menace la plus coûteuse pour une API d'inférence : la saturation du calcul.
+- **Cloud Armor** : limitation de débit (100 requêtes par minute et par IP, au-delà `429`), **ban de 10 min** au-delà de 200 requêtes par minute, rejet des corps de plus de 4096 octets (`403`) ; voir [k8s/cloud-armor-setup.sh](../../k8s/cloud-armor-setup.sh). Le trafic abusif (déni de service, force brute sur les clés, scans) est arrêté à la périphérie de Google, avant de consommer du CPU dans les pods. C'est la première barrière contre la menace la plus coûteuse pour une API d'inférence : la saturation du calcul.
 - Les **logs du load balancer sont désactivés** parce qu'ils contiennent les IP en clair ; le journal pseudonymisé de l'API les remplace.
 
 ### 3.2 API et IA
 
-- **Pods `toxic-api`** (FastAPI + PyTorch CPU) servant les modèles **BERT** et **LSTM**. Chaque pod réserve 2 CPU et 2 Gi. L'inférence est limitée par le CPU, d'où un **HorizontalPodAutoscaler** de 3 à 10 pods (cible 60 % CPU) : 3 pods minimum pour survivre à la perte d'un pod (failover vérifié par les tests de charge), 10 maximum pour plafonner le coût.
+- **Pods `toxic-api`** (FastAPI + PyTorch CPU) servant les modèles **BERT** et **LSTM**. Chaque pod réserve 2 CPU et 2 Gi. L'inférence est limitée par le CPU, d'où un **HorizontalPodAutoscaler** de 3 à 15 pods (cible 60 % CPU) : 3 pods minimum pour survivre à la perte d'un pod (failover vérifié par les tests de charge), 15 maximum pour plafonner le coût.
 - **Durcissement des conteneurs** : utilisateur non-root (UID 1000), `allowPrivilegeEscalation: false`, toutes les capabilities Linux retirées, volumes montés en lecture seule. Si l'API est compromise, l'attaquant ne peut ni devenir root ni modifier les modèles.
 - **Authentification applicative** : chaque client reçoit une clé aléatoire de 256 bits. L'API ne stocke que son **empreinte SHA-256** et la compare en temps constant. Une fuite du secret ne donne donc aucune clé utilisable. Sans clé configurée, l'API refuse de démarrer (échec fermé).
-- **Protection contre la surcharge** : une inférence à la fois par pod et une file d'attente de 20 s au plus. Au-delà, l'API répond `503` avec `Retry-After` plutôt que de laisser le pod s'effondrer.
+- **Protection contre la surcharge** (renforcée après les attaques du TP2, voir [livrable_tp2/3_defense.md](../../livrable_tp2/3_defense.md)) : au plus 4 requêtes en cours par IP (`429` immédiat au-delà), une inférence à la fois par pod, une file équitable de 8 requêtes et 2 s d'attente au plus. Au-delà, l'API répond `503` avec `Retry-After` plutôt que de faire attendre tout le monde. L'API ne renvoie que la décision `is_toxic`, pas les scores (protection contre l'extraction du modèle).
 - **Service ClusterIP** : adresse interne uniquement, ciblée par le load balancer via les NEG.
 
 ### 3.3 Stockage

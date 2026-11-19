@@ -1,13 +1,13 @@
-# Fiche AI Act : détecteur de toxicité « Digital Social Score »
+# Étape 4 — Fiche AI Act : détecteur de toxicité « Digital Social Score »
 
-Règlement (UE) 2024/1689. Dernière mise à jour : 2026-11-16. La fiche d'identité du modèle est dans [model_card.json](model_card.json).
+Règlement (UE) 2024/1689. Dernière mise à jour : 2026-11-19. La fiche d'identité du modèle est dans [model_card.json](../model_card.json), à la racine du projet ; sa conformité est vérifiée à chaque push par la CI (job `model-card`, voir [5_devsecops.md](5_devsecops.md)).
 
 ## 1. Le système de détection
 
 | | |
 |---|---|
-| Fonction | Reçoit un texte, renvoie un score de toxicité de 0 à 100 et 6 scores par classe |
-| Entrée / sortie | Texte anglais (1500 caractères max) → scores. Aucune décision n'est prise par le système |
+| Fonction | Reçoit un texte, calcule 6 probabilités (classes Jigsaw) et renvoie uniquement la décision `is_toxic` (probabilité de la classe `toxic` > 70 %) |
+| Entrée / sortie | Texte anglais (1500 caractères max) → `{"is_toxic": true/false}`. Le système signale un texte ; il ne prend aucune décision sur une personne |
 | Modèles | DistilBERT affiné (`bert`, par défaut) et BiLSTM (`lstm`) |
 | Données | Jigsaw Toxic Comment (commentaires Wikipedia), anonymisées avant entraînement |
 | Rôle dans l'AI Act | Nous sommes **fournisseur** du système. Les clients de l'API sont **déployeurs** |
@@ -45,16 +45,31 @@ Ces usages sont exclus dans `model_card.json` (`intended_use.out_of_scope`). Pou
 | Gestion des données (art. 10) | Anonymisation NER + regex, registre RGPD (`REGISTRE_TRAITEMENT.md`), limites connues documentées |
 | Documentation technique (art. 11) | `model_card.json`, ce document, `README.md`, schéma d'architecture |
 | Traçabilité (art. 12) | Journal d'accès pseudonymisé (30 jours), `X-Request-ID` dans chaque réponse |
-| Transparence (art. 13) | Scores par classe renvoyés, limites et usages exclus documentés |
-| Surveillance humaine (art. 14) | Score = aide à la décision ; relecture humaine exigée avant toute action |
-| Exactitude, robustesse, cybersécurité (art. 15) | Métriques sur jeu de test, test d'attaque (`attack/`), authentification, HTTPS, Cloud Armor, supervision Prometheus/Grafana |
+| Transparence (art. 13) | Fonctionnement, seuil, limites et usages exclus documentés (model card, `API.md`). Les scores détaillés ne sont plus renvoyés au client (voir ci-dessous) |
+| Surveillance humaine (art. 14) | Décision = aide à la modération ; relecture humaine exigée avant toute action sur un texte signalé |
+| Exactitude, robustesse, cybersécurité (art. 15) | Métriques sur jeu de test ; attaque DoS simulée puis défenses mesurées avant/après ([3_defense.md](3_defense.md)) : la précision et le taux de faux positifs restent identiques sous attaque, la disponibilité est protégée ; authentification, HTTPS, Cloud Armor (ban par IP), délestage, supervision Prometheus/Grafana ; pipeline DevSecOps à chaque push |
+
+**Arbitrage transparence / sécurité.** Jusqu'au 17/11, l'API renvoyait les 6 scores. L'audit du professeur a montré qu'ils permettaient d'extraire le modèle (entraîner une copie à partir des scores). Nous ne renvoyons plus que la décision : c'est moins transparent pour le client, mais le modèle de risque minimal n'impose pas de transparence sur les scores (art. 13 vise les systèmes à haut risque), et les scores restent conservés côté serveur (journal pseudonymisé) pour l'analyse par l'équipe. Si un client avait besoin des scores pour sa relecture humaine, il faudrait les lui ouvrir avec une clé dédiée et un quota bas, plutôt que publiquement.
+
+## 4 bis. Registre des risques du système
+
+Probabilité et gravité : faible / moyenne / forte, évaluées par l'équipe.
+
+| Risque | Probabilité | Gravité | Mesures en place | Risque résiduel |
+|---|---|---|---|---|
+| **Biais** : sur-signalement des textes mentionnant des minorités (gay, black, muslim…) | Forte (mesuré) | Forte : discrimination, censure de groupes visés | Relecture humaine obligatoire, usage documenté comme aide, biais déclaré dans la model card | **Fort** tant que le modèle n'est pas rééquilibré |
+| **Faux positifs** (texte sain signalé) | Forte : 13 % des textes sains signalés au seuil 70 (mesuré sur 200 textes sains, [3_defense.md](3_defense.md)) | Moyenne : charge de relecture, frustration, sentiment de censure | Seuil à 70 plutôt que 50, relecture humaine | Moyen |
+| **Indisponibilité (DoS)** : la modération s'arrête, les textes toxiques passent | Forte (subi : vagues 5 et 6) | Forte : exposition des utilisateurs à des contenus haineux | Cloud Armor (ban IP), plafond par IP, file équitable, délestage rapide, autoscaling | Moyen : une attaque très distribuée reste possible |
+| **Extraction du modèle** | Moyenne (constatée par l'audit) | Moyenne : copie du modèle, contournement préparé hors ligne | Décision seule renvoyée, limites de débit, ban | Faible à moyen |
+| **Fuite de données personnelles** (textes, IP) | Faible | Forte (RGPD) | Texte jamais stocké, journal pseudonymisé (HMAC), HTTPS, secrets dans Secret Manager | Faible |
+| **Usage détourné** : note de « réputation » par personne (notation sociale) | Faible | Très forte : pratique interdite (art. 5.1.c) | Usages exclus dans la model card, aucun historique par auteur | Moyen : pas encore d'interdiction contractuelle |
 
 ## 5. Écarts restants et actions
 
 | # | Écart | Action | Priorité |
 |---|---|---|---|
 | 1 | **Biais identitaires** mesurés sur un test minimal | Évaluer sur un jeu dédié (ex. Jigsaw Unintended Bias), rééquilibrer ou augmenter les données, recalibrer le seuil | Haute |
-| 2 | **Précision d'environ 44 %** à seuil 50 : beaucoup de faux positifs | Choisir le seuil selon le coût d'une erreur, évaluer sur tout le jeu de test | Haute |
+| 2 | **Précision d'environ 44 %** à seuil 50 sur le jeu de test réel (10 % de toxiques) : beaucoup de faux positifs. Le seuil de l'API est à 70 | Choisir le seuil selon le coût d'une erreur, évaluer sur tout le jeu de test | Haute |
 | 3 | Aucune interdiction contractuelle des usages exclus | Ajouter des conditions d'utilisation de l'API | Moyenne |
 | 4 | Anglais uniquement | Le préciser à chaque client, ou entraîner un modèle multilingue | Moyenne |
 | 5 | Durées de conservation des données d'entraînement non définies (registre §4) | Compléter le registre | Moyenne |

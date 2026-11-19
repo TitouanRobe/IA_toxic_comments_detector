@@ -1010,6 +1010,7 @@ dependencies = [
 dev = [
     { name = "httpx" },
     { name = "locust" },
+    { name = "pytest" },
 ]
 train = [
     { name = "en-core-web-sm" },
@@ -1034,6 +1035,7 @@ requires-dist = [
 dev = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "locust", specifier = ">=2.32" },
+    { name = "pytest", specifier = ">=8.3" },
 ]
 train = [
     { name = "en-core-web-sm", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" },

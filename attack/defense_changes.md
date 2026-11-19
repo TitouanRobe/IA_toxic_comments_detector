@@ -18,12 +18,21 @@
 Ce document fait suite à :
 - `attack/defense_analysis.md` — l'attaque du groupe « Report Jungle » contre nous (côté serveur :
   0 erreur, latence < 1 s ; les 429 venaient de Cloud Armor, en amont des pods).
-- `attack/analysis_vs_report_jungle.md` — notre attaque contre eux (leur infra n'a aucun rejet,
+- `attack/analysis_vs_report_jungle.md` — notre attaque contre le groupe « Dragons célestes » (leur infra n'avait aucun rejet,
   latence jusqu'à 56 s : l'absence de ban/rate-limit est une vraie faiblesse).
+- `attack/analysis_prof_attack.md` — l'audit du professeur contre notre API (vagues 5 et 6) :
+  la charge a atteint le modèle (7712 requêtes acceptées en 92 s, latence ×11), modèle
+  extractible via les scores, documentation publique, service instable sous charge.
 
-Conclusion de ces deux analyses : notre point fort est le **filtrage en amont (Cloud Armor)** ;
-nos axes d'amélioration sont (a) **bannir** l'attaquant plutôt que seulement le throttler, et
-(b) **réduire la surface d'épuisement par la taille d'entrée**. C'est ce qui est traité ici.
+Conclusions :
+- des deux premières analyses (§2 à §4) : notre point fort est le **filtrage en amont (Cloud
+  Armor)** ; axes d'amélioration : (a) **bannir** l'attaquant plutôt que seulement le throttler,
+  (b) **réduire la surface d'épuisement par la taille d'entrée** ;
+- de l'audit du professeur (§8 et §10) : le filtrage en amont ne suffit pas quand l'attaque passe
+  sous ses seuils. **L'application elle-même** doit refuser vite et équitablement ce qu'elle ne
+  peut pas traiter (plafond par IP, délestage rapide, file équitable), ne pas exposer plus que
+  nécessaire (décision seule, docs fermées) et rester saine sous charge (endpoints asynchrones).
+  Ces corrections ont été mesurées avant / après (§8d, §10e et `livrable_tp2/3_defense.md`).
 
 ---
 
@@ -132,7 +141,7 @@ couvre ceux qui ne l'annoncent pas.
 
 Ces mécanismes existaient déjà et nous ont protégés pendant l'attaque de l'étape 2 — l'analyse
 `defense_analysis.md` montre que le backend n'a eu **aucune erreur**. C'est précisément ce qui
-**manque** au groupe « Report Jungle » (cf. `analysis_vs_report_jungle.md`) :
+**manquait** au groupe « Dragons célestes » avant leur correction (cf. `analysis_vs_report_jungle.md`) :
 
 | Mécanisme | Fichier | Rôle |
 |---|---|---|

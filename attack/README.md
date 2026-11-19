@@ -3,6 +3,19 @@
 > Exercice pédagogique autorisé : attaque du déploiement d'un autre groupe du cours,
 > dans le but de mesurer la résistance de l'API puis de concevoir une défense (étape 3).
 
+Trois attaques sont documentées dans ce dossier : celle que **nous avons menée** contre un autre
+groupe, et les deux que **nous avons subies** (un groupe, puis le professeur). Les améliorations
+de notre API découlent surtout des secondes.
+
+| Attaque | Analyse | Ce qu'on en retient |
+|---|---|---|
+| Nous → groupe « Dragons célestes » (16/11) | [analysis_vs_report_jungle.md](analysis_vs_report_jungle.md) | Leur API ne refusait rien : latence jusqu'à 56 s. Après leur correction, 97 % de `429` |
+| Groupe « Report Jungle » → nous (13/11) | [defense_analysis.md](defense_analysis.md) | Arrêtés par Cloud Armor en amont : 0 erreur côté serveur. Le throttle simple laisse cependant revenir l'attaquant |
+| **Professeur → nous (17/11, vagues 5 et 6)** | [analysis_prof_attack.md](analysis_prof_attack.md) | L'attaque a atteint le modèle : 7712 requêtes acceptées en 92 s, latence ×11, modèle extractible, service instable. **Origine de la plupart des défenses** |
+
+Défenses qui en découlent : [defense_changes.md](defense_changes.md) (journal détaillé) et
+[livrable_tp2/3_defense.md](../livrable_tp2/3_defense.md) (synthèse et mesure avant / après).
+
 ## Fiche d'analyse « Attaque IA » (étape 1)
 
 | Champ | Contenu |
@@ -23,8 +36,10 @@
    Pour un DoS réellement efficace sur le modèle, il faut une **clé de test** du groupe cible.
    Sans clé, viser `/health` ou documenter que `/model` répond 401 (le modèle est protégé par l'auth).
 2. Le TP demande 3 métriques d'impact (**précision**, **taux de faux positifs**, **latence**).
-   Un DoS ne mesure que la **latence / disponibilité**. Précision et faux positifs relèvent d'une
-   attaque *sur le modèle* (évasion). À assumer dans le rapport, ou à compléter par une sonde d'évasion.
+   Depuis l'extérieur, `dos.py` ne mesure que la **latence / disponibilité** : on ne connaît pas
+   la vérité terrain des réponses de la cible. Précision et faux positifs sont donc mesurés sur
+   **notre** API avec `bench_defense.py` (voir plus bas), pendant que des clients légitimes
+   envoient des commentaires étiquetés.
 
 ## Mise en œuvre (étape 2) — `dos.py`
 
@@ -62,14 +77,36 @@ groupe cible attend un autre format.
 - Taux d'erreur et disponibilité (%), répartition des codes HTTP (200 / 429 / 503 / timeout).
 - Débit (req/s).
 
-## Défense (étape 3) — pistes
+## Attaques subies et améliorations qui en découlent
 
-| Contre-mesure | Effet attendu | Déjà présent dans le projet |
-|---|---|---|
-| **Rate limiting par IP/clé** (Cloud Armor, ou middleware) | Plafonne les requêtes par source → l'attaquant est bridé avant d'épuiser le pod. | Cloud Armor (renvoie 429) — voir `k8s/` |
-| **Délestage de charge** (file bornée + timeout 503) | Un pod saturé refuse vite au lieu de s'effondrer. | `MAX_CONCURRENT_INFERENCES`, `INFERENCE_QUEUE_TIMEOUT` dans `api.py` |
-| **Autoscaling (HPA)** | Ajoute des pods sous charge CPU. | `k8s/toxic-api.yaml` |
-| **Authentification obligatoire** sur `/model` | L'inférence n'est jamais déclenchée sans clé (401). | `require_api_key` dans `api.py` |
+**Groupe « Report Jungle » (13/11).** Leur script mesurait jusqu'à 100 % d'échecs (`429`) et
+concluait à un service tombé ; nos logs montraient 0 erreur et une latence normale : Cloud Armor
+avait filtré en amont. Leçon : croiser la vue de l'attaquant et celle du serveur. Amélioration :
+le simple throttle (l'attaquant revient dès qu'il ralentit) devient un **ban de 10 min par IP**.
 
-Protocole étape 3 : rejouer le **même** tir `dos.py` avant/après activation (ou durcissement) de
-la défense, puis comparer les métriques dans un tableau + graphique.
+**Professeur (17/11).** L'audit de la vague 6 a trouvé 4 problèmes, tous traités :
+
+| Constat de l'audit | Cause trouvée côté serveur | Amélioration | Effet mesuré en local |
+|---|---|---|---|
+| DoS : 7712 requêtes acceptées en 92 s, latence ×11 | Ban Cloud Armor jamais appliqué en production ; file d'attente de 20 s qui accepte tout | Script Cloud Armor pour projet neuf ; **plafond de 4 requêtes en cours par IP** (`429`) ; **délestage rapide** (8 places, 2 s, `503`) ; **file équitable** qui éjecte le spammeur | Latence médiane des clients légitimes sous flood : **1 001 → 81 ms** |
+| Service instable (vague 5) | `/health` bloqué derrière les threads occupés par la file | Endpoints asynchrones | `/health` sous charge : 620–830 ms → 2–12 ms |
+| Modèle extractible (489 req/min) | Les 6 scores renvoyés à chaque requête | Réponse réduite à `{"is_toxic": …}` | Un bit par requête au lieu de 6 probabilités |
+| `/model` trouvé via l'OpenAPI, en-têtes manquants | Documentation publique ; CSP et X-Frame-Options absents (HSTS et nosniff étaient présents) | Docs fermées en production, en-têtes complétés | Vérifié par les tests automatiques de la CI |
+
+Analyse complète : [analysis_prof_attack.md](analysis_prof_attack.md).
+
+## Défense (étape 3) et mesure avant / après — `bench_defense.py`
+
+Les défenses mises en place sont décrites dans [defense_changes.md](defense_changes.md) (journal
+détaillé) et résumées dans [livrable_tp2/3_defense.md](../livrable_tp2/3_defense.md).
+
+`bench_defense.py` rejoue la même attaque contre deux versions de **notre** API (la version
+attaquée par le professeur, commit `451d731`, et la version actuelle) pendant que des clients
+légitimes envoient des commentaires étiquetés du jeu de test : il mesure la **précision**, le
+**taux de faux positifs** et la **latence** vécus par ces clients, avec et sans défense.
+
+```bash
+uv run python attack/bench_defense.py run --ref 451d731 --label avant   # ~5 min
+uv run python attack/bench_defense.py run --label apres                  # ~5 min
+uv run python attack/bench_defense.py report   # livrable_tp2/donnees/tableau_avant_apres.md + figures/
+```

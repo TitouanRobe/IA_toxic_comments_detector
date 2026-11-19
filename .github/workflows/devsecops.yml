@@ -96,3 +96,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker run --rm -v "$PWD/k8s:/k8s:ro" stackrox/kube-linter:v0.7.1 lint /k8s/toxic-api.yaml
+
+  # 8. Tests des défenses de l'API (en-têtes, docs fermées, limites de taille, plafond par IP,
+  #    file équitable). Modèle factice : aucun poids à télécharger.
+  tests:
+    name: Tests des défenses (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --no-default-groups --group dev
+      - run: uv run --no-sync pytest -v
+
+  # 9. Conformité IA Act : model_card.json complète et cohérente (champs exigés, niveau de risque
+  #    autorisé et justifié, biais documenté, documents cités présents).
+  model-card:
+    name: Conformité IA Act (model card)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ci/check_model_card.py

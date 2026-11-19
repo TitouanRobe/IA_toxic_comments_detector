@@ -233,3 +233,6 @@ old_artifacts
 
 # Clé d'API utilisée par les tests de charge
 loadtest/.api_key
+
+# Fichiers système macOS
+.DS_Store

@@ -335,7 +335,7 @@ Résultats dans `loadtest/results/` : `<test>_stats.csv` (latences moyenne, P50/
 
 ## Pipeline CI/CD (GitHub Actions)
 
-Le workflow `.github/workflows/devsecops.yml` se lance à chaque push sur `main` et à chaque pull request. Ses 8 jobs tournent en parallèle ; un seul échec met la pipeline en échec et peut bloquer la fusion. Le workflow n'a que le droit de lire le dépôt, et les outils tournent en conteneur ou via `uvx`, à version fixée.
+Le workflow `.github/workflows/devsecops.yml` se lance à chaque push sur `main` et à chaque pull request. Ses 10 jobs tournent en parallèle ; un seul échec met la pipeline en échec et peut bloquer la fusion. Le workflow n'a que le droit de lire le dépôt, et les outils tournent en conteneur ou via `uvx`, à version fixée.
 
 | Job | Outil | Ce qu'il vérifie |
 |---|---|---|
@@ -347,12 +347,16 @@ Le workflow `.github/workflows/devsecops.yml` se lance à chaque push sur `main`
 | `trivy-image` | trivy | Construit l'image (amd64) puis cherche des failles HIGH et CRITICAL (celles sans correctif disponible sont ignorées) |
 | `kubeconform` | kubeconform | Validité du manifeste `k8s/toxic-api.yaml` (mode strict ; les CRD GKE, sans schéma public, sont ignorés) |
 | `kube-linter` | kube-linter | Bonnes pratiques de sécurité du manifeste (non-root, système de fichiers en lecture seule, etc.) |
+| `tests` | pytest | Défenses de l'API : en-têtes, docs fermées, limites de taille (413/422), réponse sans scores, plafond par IP (429), file équitable ([tests/](tests/)) |
+| `model-card` | [ci/check_model_card.py](ci/check_model_card.py) | Conformité IA Act de `model_card.json` : champs exigés, niveau de risque autorisé et justifié, biais documenté |
 
 Pour reproduire les contrôles Python en local :
 
 ```bash
 uvx ruff check .
 uvx bandit -c pyproject.toml -r . -ll
+uv run pytest -v
+python ci/check_model_card.py
 ```
 
 Les exceptions assumées sont documentées là où elles sont déclarées : `[tool.ruff]` et `[tool.bandit]` dans `pyproject.toml` (par exemple `B615`, sans objet car l'image tourne en `HF_HUB_OFFLINE=1`), et les commentaires `# noqa`.

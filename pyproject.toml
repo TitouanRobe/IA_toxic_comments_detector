@@ -25,6 +25,7 @@ train = [
 dev = [
     "httpx>=0.28.1",
     "locust>=2.32",
+    "pytest>=8.3",
 ]
 
 [tool.uv]
@@ -68,9 +69,15 @@ ignore = ["E501", "E741", "B905"]
 # conception, le code n'est pas embarqué dans l'image de production.
 "loadtest/*" = ["S"]
 "attack/*" = ["S"]
+# Tests : les assert sont le mécanisme de pytest, et les clés de test sont factices.
+"tests/*" = ["S101", "S105", "S106"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]  # api.py et toxicity/ sont à la racine (pas de paquet installé)
 
 [tool.bandit]
-exclude_dirs = [".venv", "artifacts", "old_artifacts", "loadtest", "attack"]
+exclude_dirs = [".venv", "artifacts", "old_artifacts", "loadtest", "attack", "tests"]
 # B615 : from_pretrained() sans `revision`. Les modèles de base sont téléchargés uniquement à
 # l'entraînement (PRETRAINED dans toxicity/models/*.py) ; en production l'image fixe
 # HF_HUB_OFFLINE=1 et charge les poids depuis un volume, aucun appel au Hub n'est fait.

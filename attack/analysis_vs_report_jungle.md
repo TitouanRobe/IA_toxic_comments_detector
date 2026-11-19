@@ -1,7 +1,7 @@
 # Analyse — Notre attaque DoS contre l'API des Dragons celestes
 
 **Objet :** interpréter les tirs effectués avec `attack/dos.py` contre l'API du groupe
-« Report Jungle » (`http://136.82.199.122/laya/...`), pour le livrable étape 2
+« Dragons célestes » (`http://136.82.199.122/laya/...`), pour le livrable étape 2
 (« Mise en œuvre de l'attaque » / « graphique des métriques + interprétation »).
 
 **Cible :** `GET /laya/health` (endpoint public, sans clé). On n'a pas de clé de test pour

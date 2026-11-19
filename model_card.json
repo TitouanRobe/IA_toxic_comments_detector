@@ -1,7 +1,8 @@
 {
-  "model_name": "Digital Social Score - détecteur de toxicité",
-  "description": "Détection de propos toxiques dans un texte : score de 0 à 100 (probabilité maximale parmi 6 classes Jigsaw : toxic, severe_toxic, obscene, threat, insult, identity_hate). Le score qualifie un TEXTE, jamais une personne.",
-  "risk_level": "minimal (AI Act) : hors pratiques interdites (art. 5) et hors Annexe III (haut risque) tant que le score n'est pas utilisé pour évaluer ou sanctionner une personne ; voir AI_ACT.md",
+  "model_name": "Digital Social Score v2 - détecteur de toxicité",
+  "description": "Détection de propos toxiques dans un texte. Le modèle calcule 6 probabilités (classes Jigsaw : toxic, severe_toxic, obscene, threat, insult, identity_hate) ; l'API ne renvoie que la décision is_toxic (probabilité de la classe toxic > 70 %), les scores restant côté serveur (protection contre l'extraction du modèle). La décision qualifie un TEXTE, jamais une personne.",
+  "risk_level": "minimal",
+  "risk_justification": "Hors pratiques interdites (art. 5 : le système évalue un texte, pas une personne, et ne tient aucun historique par auteur), hors Annexe III (la modération de contenu n'est pas un domaine à haut risque), hors obligations de transparence de l'art. 50 (pas d'agent conversationnel ni de contenu généré). Classement valable tant que la décision n'est pas utilisée pour noter, trier ou sanctionner des personnes : voir livrable_tp2/4_fiche_ia_act.md",
   "data_source": "Jigsaw Toxic Comment Classification (Kaggle) : commentaires de pages de discussion Wikipedia annotés par des humains. Données publiques, aucune collecte directe.",
   "privacy_measures": [
     "anonymisation NER spaCy + regex avant entraînement (personnes, emails, IP, téléphones, URL, IBAN, cartes, adresses, pseudonymes)",
@@ -12,8 +13,12 @@
     "hébergement UE (europe-west1)"
   ],
   "bias_detected": true,
-  "version": "1.0",
-  "last_update": "2026-11-16",
+  "version": "2.0",
+  "last_update": "2026-11-19",
+  "changelog": {
+    "1.0 (2026-11-16)": "Première version : modèles bert et lstm, API qui renvoie les scores des 6 classes.",
+    "2.0 (2026-11-19)": "Après les attaques du TP2 : l'API ne renvoie plus que is_toxic (anti-extraction), texte limité à 1500 caractères, défenses contre le déni de service. Poids des modèles inchangés."
+  },
 
   "model_details": {
     "architectures": {
@@ -29,7 +34,7 @@
       "seed": 42,
       "trained_on": "2026-11-10"
     },
-    "output": "scores 0-100 par classe ; is_toxic = score de la classe toxic > 70",
+    "output": "API : {\"is_toxic\": bool}, vrai si la probabilité de la classe toxic dépasse 70 %. Les scores des 6 classes sont calculés mais conservés côté serveur (journal pseudonymisé, métriques)",
     "owners": "Cléo Martin-Colleu, Titouan Robe"
   },
 
@@ -49,7 +54,20 @@
     "bert": {"mean_roc_auc": 0.9851, "precision": 0.4402, "recall": 0.9489, "f1": 0.6014, "ms_per_comment": 32.76},
     "lstm": {"mean_roc_auc": 0.9756, "precision": 0.4174, "recall": 0.9346, "f1": 0.5770, "ms_per_comment": 1.35},
     "roc_auc_per_class_bert": {"toxic": 0.9698, "severe_toxic": 0.9915, "obscene": 0.9785, "threat": 0.9974, "insult": 0.9790, "identity_hate": 0.9943},
-    "note": "Rappel élevé mais précision faible (environ 44 %) : le modèle sur-signale (beaucoup de faux positifs). Le temps est mesuré sur Apple M3 (MPS), pas sur GKE."
+    "note": "Rappel élevé mais précision faible (environ 44 %) : le modèle sur-signale (beaucoup de faux positifs). Le temps est mesuré sur Apple M3 (MPS), pas sur GKE.",
+    "api_decision_threshold_70": {
+      "evaluation_set": "400 commentaires de data/test.csv (200 toxiques, 200 non toxiques, graine 42), envoyés à l'API (bert, CPU) par attack/bench_defense.py",
+      "precision": 0.881, "false_positive_rate": 0.130, "recall": 0.965,
+      "note": "Échantillon équilibré : la précision serait plus basse sur le flux réel (environ 10 % de toxiques). Le taux de faux positifs n'en dépend pas."
+    }
+  },
+
+  "robustness": {
+    "attack_tested": "Déni de service sur l'endpoint d'inférence (MITRE ATLAS AML.T0029), flood depuis 1 IP et depuis 25 IP",
+    "effect_on_decisions": "Aucun : 100 % des décisions identiques sous attaque et au repos",
+    "effect_on_availability": "Version 1.0 : latence médiane x26 (1 IP), x52 (25 IP). Version 2.0 : x2 (1 IP), x6 et 57 % de refus rapides (25 IP)",
+    "defenses": "Cloud Armor (ban par IP), plafond de requêtes simultanées par IP, file d'attente équitable bornée, délestage rapide, limites de taille, décision seule renvoyée (anti-extraction)",
+    "details": "livrable_tp2/3_defense.md"
   },
 
   "bias_analysis": {
@@ -67,12 +85,12 @@
   "limitations": [
     "faux positifs fréquents sur les termes identitaires (voir bias_analysis)",
     "anglais uniquement, vocabulaire Wikipedia de 2015-2017 : sarcasme, ironie, citation et argot récent mal gérés",
-    "vulnérable aux contournements adversariaux (fautes volontaires, caractères spéciaux, voir attack/)",
+    "non testé contre l'évasion adversariale (fautes volontaires, caractères spéciaux, homoglyphes) : seule l'attaque par déni de service a été simulée (attack/)",
     "anonymisation par NER non garantie à 100 % : données pseudonymisées, pas anonymes",
     "métriques mesurées sur un échantillon de 5000 commentaires, pas sur tout le jeu de test"
   ],
 
-  "human_oversight": "Le score est une aide à la décision : un humain relit tout texte signalé avant action. L'API renvoie les scores par classe pour permettre cette relecture.",
-  "transparency": "Les utilisateurs finaux doivent être informés qu'un système automatique analyse leurs textes (RGPD art. 13-14, bonne pratique AI Act).",
-  "related_documents": ["AI_ACT.md", "REGISTRE_TRAITEMENT.md", "README.md", "docs/architecture/ARCHITECTURE_CLOUD.md"]
+  "human_oversight": "La décision est une aide à la modération : un humain relit tout texte signalé (is_toxic = true) avant toute action. Les scores détaillés restent accessibles à l'équipe côté serveur (journal pseudonymisé) pour analyser une erreur.",
+  "transparency": "Les utilisateurs finaux doivent être informés qu'un système automatique analyse leurs textes (RGPD art. 13-14, bonne pratique AI Act). Seuil, limites et usages exclus sont documentés dans ce fichier et dans API.md.",
+  "related_documents": ["livrable_tp2/4_fiche_ia_act.md", "livrable_tp2/3_defense.md", "REGISTRE_TRAITEMENT.md", "README.md", "API.md", "docs/architecture/ARCHITECTURE_CLOUD.md"]
 }
