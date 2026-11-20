@@ -1,0 +1,78 @@
+{
+  "model_name": "Digital Social Score - détecteur de toxicité",
+  "description": "Détection de propos toxiques dans un texte : score de 0 à 100 (probabilité maximale parmi 6 classes Jigsaw : toxic, severe_toxic, obscene, threat, insult, identity_hate). Le score qualifie un TEXTE, jamais une personne.",
+  "risk_level": "minimal (AI Act) : hors pratiques interdites (art. 5) et hors Annexe III (haut risque) tant que le score n'est pas utilisé pour évaluer ou sanctionner une personne ; voir AI_ACT.md",
+  "data_source": "Jigsaw Toxic Comment Classification (Kaggle) : commentaires de pages de discussion Wikipedia annotés par des humains. Données publiques, aucune collecte directe.",
+  "privacy_measures": [
+    "anonymisation NER spaCy + regex avant entraînement (personnes, emails, IP, téléphones, URL, IBAN, cartes, adresses, pseudonymes)",
+    "texte envoyé à l'API jamais stocké ni journalisé",
+    "journal d'accès pseudonymisé (HMAC-SHA256 du client et de l'IP, clé dans Secret Manager), conservé 30 jours",
+    "chiffrement en transit (HTTPS uniquement, HSTS) et au repos (Google Cloud)",
+    "authentification par clé d'API (seules les empreintes SHA-256 sont stockées)",
+    "hébergement UE (europe-west1)"
+  ],
+  "bias_detected": true,
+  "version": "1.0",
+  "last_update": "2026-11-16",
+
+  "model_details": {
+    "architectures": {
+      "bert": "distilbert-base-uncased affiné (modèle par défaut de l'API)",
+      "lstm": "BiLSTM entraîné from scratch (modèle rapide)",
+      "laya": "ModernBERT-large + tête 6 classes (entraîné, non déployé : trop gourmand en mémoire)"
+    },
+    "served_models": ["bert", "lstm"],
+    "training": {
+      "epochs_bert": 3,
+      "epochs_lstm": 3,
+      "max_length": 256,
+      "seed": 42,
+      "trained_on": "2026-11-10"
+    },
+    "output": "scores 0-100 par classe ; is_toxic = score de la classe toxic > 70",
+    "owners": "Cléo Martin-Colleu, Titouan Robe"
+  },
+
+  "intended_use": {
+    "primary": "Aider la modération de commentaires : signaler les textes probablement toxiques pour relecture humaine.",
+    "out_of_scope": [
+      "attribuer un score, une note ou une réputation à une personne (notation sociale, interdite par l'art. 5.1.c)",
+      "décision automatique sans relecture humaine ayant un effet sur une personne (sanction, exclusion, licenciement, accès à un service)",
+      "recrutement, évaluation d'étudiants ou de salariés, police, justice, migration (Annexe III : haut risque)",
+      "détection d'émotions ou déduction d'opinions, religion ou orientation sexuelle",
+      "textes non anglais (modèle entraîné sur de l'anglais uniquement)"
+    ]
+  },
+
+  "performance": {
+    "evaluation_set": "data/test_clean.csv (test Jigsaw anonymisé et nettoyé), échantillon de 5000 commentaires, seed 42, décision toxique si score >= 50",
+    "bert": {"mean_roc_auc": 0.9851, "precision": 0.4402, "recall": 0.9489, "f1": 0.6014, "ms_per_comment": 32.76},
+    "lstm": {"mean_roc_auc": 0.9756, "precision": 0.4174, "recall": 0.9346, "f1": 0.5770, "ms_per_comment": 1.35},
+    "roc_auc_per_class_bert": {"toxic": 0.9698, "severe_toxic": 0.9915, "obscene": 0.9785, "threat": 0.9974, "insult": 0.9790, "identity_hate": 0.9943},
+    "note": "Rappel élevé mais précision faible (environ 44 %) : le modèle sur-signale (beaucoup de faux positifs). Le temps est mesuré sur Apple M3 (MPS), pas sur GKE."
+  },
+
+  "bias_analysis": {
+    "method": "Phrases neutres identiques (8 gabarits, ex. « I am a {} person. ») où seul le groupe change, 18 groupes. Test maison, petit et non exhaustif.",
+    "findings": "Sur des phrases bienveillantes, bert donne un score toxic moyen de 88 % (lesbian), 86 % (gay), 62 % (transgender), 59 % (black), contre moins de 2 % pour man, woman, american, french, christian. lstm : 90 % (gay), 68 % (black), 64 % (muslim). Les mentions de groupes minoritaires sont donc sur-signalées.",
+    "likely_cause": "Dans le jeu d'entraînement, ces termes apparaissent surtout dans des commentaires toxiques : le modèle apprend le mot, pas l'intention.",
+    "mitigation_planned": [
+      "relecture humaine obligatoire avant toute action",
+      "jeu d'évaluation de biais plus large (ex. Jigsaw Unintended Bias) avant tout usage réel",
+      "rééquilibrage ou augmentation de données (gabarits neutres avec termes identitaires)",
+      "relever le seuil ou le calibrer par groupe après mesure"
+    ]
+  },
+
+  "limitations": [
+    "faux positifs fréquents sur les termes identitaires (voir bias_analysis)",
+    "anglais uniquement, vocabulaire Wikipedia de 2015-2017 : sarcasme, ironie, citation et argot récent mal gérés",
+    "vulnérable aux contournements adversariaux (fautes volontaires, caractères spéciaux, voir attack/)",
+    "anonymisation par NER non garantie à 100 % : données pseudonymisées, pas anonymes",
+    "métriques mesurées sur un échantillon de 5000 commentaires, pas sur tout le jeu de test"
+  ],
+
+  "human_oversight": "Le score est une aide à la décision : un humain relit tout texte signalé avant action. L'API renvoie les scores par classe pour permettre cette relecture.",
+  "transparency": "Les utilisateurs finaux doivent être informés qu'un système automatique analyse leurs textes (RGPD art. 13-14, bonne pratique AI Act).",
+  "related_documents": ["AI_ACT.md", "REGISTRE_TRAITEMENT.md", "README.md", "docs/architecture/ARCHITECTURE_CLOUD.md"]
+}

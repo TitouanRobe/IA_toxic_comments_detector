@@ -1,0 +1,25 @@
+# Assemble la supervision : kubectl kustomize k8s/monitoring | sed ... | kubectl apply -f -
+# Les fichiers de configuration deviennent des ConfigMaps dont le nom inclut un hash du
+# contenu : modifier une règle d'alerte ou le tableau de bord redémarre le pod concerné.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - monitoring.yaml
+configMapGenerator:
+  - name: prometheus-config
+    namespace: monitoring
+    files:
+      - prometheus.yml
+      - alert-rules.yml
+  - name: grafana-datasources
+    namespace: monitoring
+    files:
+      - datasources.yml=grafana-datasources.yml
+  - name: grafana-dashboard-providers
+    namespace: monitoring
+    files:
+      - dashboards.yml=grafana-dashboards.yml
+  - name: grafana-dashboards
+    namespace: monitoring
+    files:
+      - toxic-api.json=dashboard-toxic-api.json

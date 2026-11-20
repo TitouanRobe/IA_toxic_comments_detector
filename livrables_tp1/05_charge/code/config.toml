@@ -1,0 +1,54 @@
+# Configuration des tests de charge, lue par loadtest/locustfile.py et loadtest/run.py.
+# Modifier ce fichier suffit pour changer la cible, la charge ou les scénarios.
+
+[target]
+host = "https://toxic-api.cacaland.fr"
+model = "bert" # bert | lstm | laya
+# Clé d'API : variable d'environnement API_KEY si elle est définie, sinon ce fichier
+# (une ligne, la clé dss_...). Il est exclu de git : ne jamais y mettre autre chose qu'une clé de test.
+api_key_file = "loadtest/.api_key"
+
+[users]
+# Pause aléatoire entre deux requêtes d'un même utilisateur virtuel (secondes) :
+# ~1 requête/s par utilisateur tant que l'API répond vite.
+wait_min = 0.5
+wait_max = 1.5
+
+[monitoring]
+hpa_interval = 15 # secondes entre deux relevés du nombre de pods et du CPU (HPA)
+results_dir = "loadtest/results"
+
+# Scénarios. stages = liste de paliers [fin du palier en s, utilisateurs, utilisateurs ajoutés par s].
+# failover_at (optionnel) : supprime un pod de l'API à cet instant (s) pour tester la reprise.
+
+[scenarios.ramp]
+description = "Croissance progressive : 5 -> 120 utilisateurs par paliers de 90 s"
+stages = [
+  [90, 5, 2], [180, 10, 2], [270, 20, 2], [360, 40, 2],
+  [450, 60, 2], [540, 80, 2], [630, 100, 2], [720, 120, 2],
+]
+
+[scenarios.rapid]
+description = "Montée rapide : 0 -> 120 utilisateurs en 12 s, maintenus 8 min (réactivité de l'autoscaling)"
+stages = [[12, 120, 10], [480, 120, 10]]
+
+[scenarios.soak]
+description = "Charge soutenue : 60 utilisateurs pendant 30 min (stabilité, fuites mémoire, latence dans la durée)"
+stages = [[30, 60, 2], [1800, 60, 2]]
+
+[scenarios.failover]
+description = "Failover : 40 utilisateurs pendant 10 min, un pod supprimé à 5 min"
+stages = [[20, 40, 2], [600, 40, 2]]
+failover_at = 300
+
+[scenarios.stress]
+description = "Stress : 200 utilisateurs en 1 min, au-delà de la capacité"
+stages = [[60, 200, 5], [300, 200, 5]]
+
+[scenarios.spike]
+description = "Pic soudain : 10 -> 150 -> 10 utilisateurs"
+stages = [[120, 10, 2], [300, 150, 50], [480, 10, 50]]
+
+[scenarios.smoke]
+description = "Vérification rapide avant un vrai test : 2 utilisateurs pendant 30 s"
+stages = [[30, 2, 2]]

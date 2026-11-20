@@ -57,11 +57,11 @@ curl -X POST http://127.0.0.1:8000/model -H "Content-Type: application/json" \
 
 | Donnée | En transit | Au repos |
 |---|---|---|
-| Texte analysé | HTTPS uniquement (port 80 fermé sur le load balancer) ; load balancer → pod dans le réseau Google, chiffré au niveau réseau par Google | Jamais stocké : ni base, ni logs applicatifs, pas dans l'URL ; `Cache-Control: no-store` sur les réponses |
-| Clé d'API | Header `X-API-Key`, uniquement en HTTPS | Nulle part : seule son empreinte SHA-256 est stockée, dans Secret Manager (chiffré AES-256 par Google, accès IAM restreint, tracé) |
+| Texte analysé | HTTP (choix du projet, pas de HTTPS) : le texte circule en clair entre le client et le load balancer ; load balancer → pod dans le réseau Google, chiffré au niveau réseau par Google | Jamais stocké : ni base, ni logs applicatifs, pas dans l'URL ; `Cache-Control: no-store` sur les réponses |
+| Clé d'API | Header `X-API-Key`, en clair en HTTP (HTTPS recommandé en production réelle) | Nulle part : seule son empreinte SHA-256 est stockée, dans Secret Manager (chiffré AES-256 par Google, accès IAM restreint, tracé) |
 | Modèles (image) | Push/pull en HTTPS vers Artifact Registry | Chiffrés par Google dans Artifact Registry |
 
-L'en-tête `Strict-Transport-Security` (HSTS) impose HTTPS aux navigateurs pendant un an.
+L'API est exposée en HTTP simple : l'en-tête `Strict-Transport-Security` (HSTS) est envoyé mais sans effet tant que le service n'est pas en HTTPS.
 
 ### Journal d'accès pseudonymisé
 
@@ -116,9 +116,9 @@ Le déploiement est décrit dans [k8s/toxic-api.yaml](k8s/toxic-api.yaml) :
 | Objet | Rôle |
 |---|---|
 | `Deployment` | Pods de l'API : 2 CPU, 2 Gi, non-root, sondes sur `/health` ; modèles servis : `bert`, `lstm` (`ALLOWED_MODELS`) |
-| `HorizontalPodAutoscaler` | 1 à 5 pods, cible 70 % de CPU |
+| `HorizontalPodAutoscaler` | 3 à 15 pods, cible 60 % de CPU |
 | `Service` | Point d'accès interne aux pods, ciblé par l'Ingress |
-| `Ingress` + `ManagedCertificate` | Load balancer HTTPS public (HTTP désactivé), certificat géré par Google |
+| `Ingress` + `ManagedCertificate` | Load balancer public, HTTP autorisé (port 80) ; certificat géré par Google prévu pour passer en HTTPS |
 | `ServiceAccount` + `SecretProviderClass` | Identité de l'API (Workload Identity) et montage des empreintes de clés depuis Secret Manager |
 | `PersistentVolume` + `PersistentVolumeClaim` (`model-cache`) | Stockage persistant des modèles : bucket Cloud Storage monté en lecture seule par tous les pods (pilote GCS FUSE) |
 | `BackendConfig` | Health check, timeout de 120 s, politique Cloud Armor |
@@ -190,20 +190,17 @@ kubectl rollout status deployment/toxic-api
 kubectl describe managedcertificate toxic-api-cert   # attendre "Status: Active" (jusqu'à ~1 h)
 
 # Appel
-curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" \
+curl -X POST http://$DOMAIN/model -H "Content-Type: application/json" \
   -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
 ```
 
-**API déployée** : IP publique `136.82.246.21`, soit le domaine `136.82.246.21.sslip.io` (voir `DOMAIN` ci-dessus).
+**API déployée** : `http://136.82.246.21/` (IP publique statique, HTTP).
 
 ```bash
-DOMAIN=136.82.246.21.sslip.io
-curl https://$DOMAIN/health
-curl -X POST https://$DOMAIN/model -H "Content-Type: application/json" \
+curl http://136.82.246.21/health
+curl -X POST http://136.82.246.21/model -H "Content-Type: application/json" \
   -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
 ```
-
-L'accès se fait **par le nom de domaine, en HTTPS** : `https://136.82.246.21/` (IP seule) échoue, car le certificat géré et l'Ingress sont liés au domaine et le port 80 est fermé.
 
 - **Nouvelle version** : nouveau `TAG`, build et push, puis la commande `sed … | kubectl apply` ci-dessus. Le changement de tag suffit à déclencher le déploiement (pas besoin de `rollout restart`). Retour arrière : relancer l'`apply` avec l'ancien `TAG`.
 - **Sans domaine** (test) : `kubectl port-forward svc/toxic-api 8080:80` puis `curl localhost:8080/health`. Le certificat géré ne s'active pas sans DNS valide.
@@ -222,7 +219,7 @@ L'accès se fait **par le nom de domaine, en HTTPS** : `https://136.82.246.21/` 
   kubectl -n monitoring scale deployment/grafana deployment/prometheus --replicas=1
   ```
 - **Mettre à jour un modèle** (sans reconstruire l'image) : `gcloud storage cp -r artifacts/bert gs://$PROJECT-toxic-models/` puis `kubectl rollout restart deployment/toxic-api` (les modèles sont chargés au démarrage des pods).
-- **Sécurité** : HTTPS uniquement (certificat géré, port 80 fermé, HSTS), clé d'API (`X-API-Key`) dont seule l'empreinte est stockée dans Secret Manager (lecture réservée au compte de service de l'API, accès tracés dans Cloud Audit Logs) et limitation de débit par IP (Cloud Armor).
+- **Sécurité** : HTTP simple (pas de HTTPS : clé d'API et texte en clair sur Internet, limite assumée), clé d'API (`X-API-Key`) dont seule l'empreinte est stockée dans Secret Manager (lecture réservée au compte de service de l'API, accès tracés dans Cloud Audit Logs) et limitation de débit par IP (Cloud Armor).
 - **Ajouter un client ou changer de clé sans coupure** : ajouter une version du secret contenant toutes les empreintes valides (une par ligne), puis redémarrer (le secret est lu au démarrage du pod) :
   `printf '%s\n%s' "$EMPREINTE1" "$EMPREINTE2" | gcloud secrets versions add toxic-api-keys --data-file=-` puis `kubectl rollout restart deployment/toxic-api`.
   Les anciennes versions restent consultables et réactivables (`gcloud secrets versions list toxic-api-keys`).

@@ -1,0 +1,46 @@
+{
+  "model": "bert",
+  "device": "mps (amp=off)",
+  "test_csv": "test_clean.csv",
+  "inference_seconds": 149.96,
+  "ms_per_comment": 29.993,
+  "test": {
+    "mean_roc_auc": 0.9850774595893709,
+    "roc_auc": {
+      "toxic": 0.9698105343159559,
+      "severe_toxic": 0.9915475950895553,
+      "obscene": 0.9785028157677155,
+      "threat": 0.997355715314422,
+      "insult": 0.9789937454536214,
+      "identity_hate": 0.9942543515949545
+    },
+    "precision_any_toxic": 0.44022770398481975,
+    "recall_any_toxic": 0.9488752556237219,
+    "f1_any_toxic": 0.6014257939079715,
+    "precision_per_class": {
+      "toxic": 0.4357754519505233,
+      "severe_toxic": 0.19708029197080293,
+      "obscene": 0.4523809523809524,
+      "threat": 0.3488372093023256,
+      "insult": 0.40931780366056575,
+      "identity_hate": 0.5221238938053098
+    },
+    "recall_per_class": {
+      "toxic": 0.9521829521829522,
+      "severe_toxic": 0.8709677419354839,
+      "obscene": 0.9140893470790378,
+      "threat": 0.8823529411764706,
+      "insult": 0.924812030075188,
+      "identity_hate": 0.8805970149253731
+    },
+    "f1_per_class": {
+      "toxic": 0.597911227154047,
+      "severe_toxic": 0.32142857142857145,
+      "obscene": 0.6052332195676906,
+      "threat": 0.5,
+      "insult": 0.5674740484429066,
+      "identity_hate": 0.6555555555555556
+    },
+    "n_samples": 5000
+  }
+}

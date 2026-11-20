@@ -1,0 +1,16 @@
+{
+  "model": "lstm",
+  "epochs": 3,
+  "batch_size": 128,
+  "lr": null,
+  "max_length": 256,
+  "warmup_ratio": 0.1,
+  "weight_decay": 0.01,
+  "grad_clip": 1.0,
+  "max_pos_weight": 10.0,
+  "val_ratio": 0.1,
+  "limit": null,
+  "test_limit": null,
+  "num_workers": 0,
+  "seed": 42
+}

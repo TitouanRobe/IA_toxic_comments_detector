@@ -1,0 +1,315 @@
+# Déploiement de l'API sur GKE : Deployment + autoscaling + exposition HTTPS (Ingress).
+# REGION, PROJECT_ID, DOMAIN et IMAGE_TAG sont remplacés au moment de l'apply (voir README) :
+#   sed -e "s/REGION/$REGION/" -e "s/PROJECT_ID/$PROJECT/" -e "s/DOMAIN/$DOMAIN/" -e "s/IMAGE_TAG/$TAG/" \
+#     k8s/toxic-api.yaml | kubectl apply -f -
+#
+# Prérequis créés avec gcloud (voir README) : l'IP statique "toxic-api-ip", la politique
+# Cloud Armor "toxic-api-policy", les secrets "toxic-api-keys" et "toxic-api-log-key",
+# et le bucket des modèles "PROJECT_ID-toxic-models".
+#
+# Compte de service Kubernetes de l'API. Via Workload Identity, c'est cette identité
+# qui reçoit le droit IAM de lire le secret (et elle seule).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: toxic-api
+---
+# Empreintes SHA-256 des clés d'API, lues dans Google Secret Manager et montées en fichier
+# dans le pod (module Secret Manager de GKE). Les clés elles-mêmes ne sont stockées nulle part.
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: toxic-api-keys
+spec:
+  provider: gke
+  parameters:
+    secrets: |
+      - resourceName: "projects/PROJECT_ID/secrets/toxic-api-keys/versions/latest"
+        path: "api_key_hashes"
+      - resourceName: "projects/PROJECT_ID/secrets/toxic-api-log-key/versions/latest"
+        path: "log_pseudonym_key" # clé HMAC de pseudonymisation des logs
+---
+# Stockage persistant des modèles : bucket Cloud Storage "PROJECT_ID-toxic-models" exposé en
+# volume (pilote GCS FUSE de GKE). Les poids ne sont plus dans l'image Docker : ils survivent
+# aux redémarrages et aux nouvelles versions de l'image, et sont partagés par tous les pods.
+# ReadOnlyMany : lisible par N pods sur N nœuds (un Persistent Disk classique n'accepte qu'un
+# seul nœud en écriture, ce qui bloquerait l'autoscaling).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: model-cache
+spec:
+  accessModes: [ReadOnlyMany]
+  capacity:
+    storage: 5Gi # indicatif : un bucket n'a pas de taille fixe
+  storageClassName: gcs-models # nom libre, identique dans le PVC (provisionnement statique)
+  persistentVolumeReclaimPolicy: Retain # supprimer le PVC ne supprime pas les modèles
+  claimRef:
+    namespace: default
+    name: model-cache
+  mountOptions:
+    - implicit-dirs # voir les dossiers (bert/, lstm/, laya/) créés par "gcloud storage cp"
+  csi:
+    driver: gcsfuse.csi.storage.gke.io
+    volumeHandle: PROJECT_ID-toxic-models # nom du bucket
+    readOnly: true
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: gcs-models
+  volumeName: model-cache
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: toxic-api
+  labels:
+    app: toxic-api
+spec:
+  # Pas de "replicas" : c'est le HorizontalPodAutoscaler qui en décide
+  # (sinon chaque kubectl apply le ramènerait à la valeur fixée ici).
+  selector:
+    matchLabels:
+      app: toxic-api
+  template:
+    metadata:
+      labels:
+        app: toxic-api
+      annotations:
+        gke-gcsfuse/volumes: "true" # injecte le conteneur GCS FUSE qui monte le bucket des modèles
+    spec:
+      serviceAccountName: toxic-api
+      # Doit dépasser la pause du preStop ci-dessous.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # utilisateur "app" créé dans le Dockerfile
+      containers:
+        - name: toxic-api
+          # Tag unique par build (IMAGE_TAG, voir README) : un tag réutilisé (ex. "v2" repoussé)
+          # n'est pas retéléchargé par un nœud qui l'a déjà en cache, qui garderait l'ancienne image.
+          image: REGION-docker.pkg.dev/PROJECT_ID/toxic/toxic-api:IMAGE_TAG
+          ports:
+            - name: http
+              containerPort: 8080
+            # Métriques Prometheus : port non publié par le Service, donc inaccessible depuis
+            # Internet ; seul Prometheus (namespace monitoring) le lit.
+            - name: metrics
+              containerPort: 8081
+          env:
+            - name: PRELOAD_MODELS
+              value: "bert"
+            - name: ALLOWED_MODELS # modèles servis ; LAYA demanderait ~3 Go de mémoire par pod
+              value: "bert,lstm"
+            - name: TORCH_NUM_THREADS # à aligner sur resources.requests.cpu
+              value: "2"
+            # Délestage rapide (voir api.py) : au plus 8 requêtes en attente par pod, 2 s d'attente
+            # max ; au-delà, 503 immédiat plutôt qu'une latence qui explose sous flood. File
+            # pleine : c'est une requête de l'IP la plus présente qui est éjectée.
+            - name: MAX_QUEUE_LENGTH
+              value: "8"
+            - name: INFERENCE_QUEUE_TIMEOUT
+              value: "2"
+            # Au plus 4 requêtes /model en cours par IP et par pod, puis 429 avant toute lecture.
+            # Test de charge depuis une seule machine : passer à "0" le temps du test.
+            - name: MAX_IN_FLIGHT_PER_IP
+              value: "4"
+            # /docs et /openapi.json fermés en production (ne pas exposer la carte de l'API).
+            - name: ENABLE_DOCS
+              value: "0"
+            # Empreintes des clés, fichier monté depuis Secret Manager (volume "api-keys" ci-dessous).
+            # Secret absent ou accès refusé : le pod ne démarre pas.
+            - name: API_KEY_HASHES_FILE
+              value: /secrets/api_key_hashes
+            # Même clé pour tous les pods : un client a le même pseudonyme quel que soit le pod.
+            - name: LOG_PSEUDONYM_KEY_FILE
+              value: /secrets/log_pseudonym_key
+          volumeMounts:
+            - name: api-keys
+              mountPath: /secrets
+              readOnly: true
+            # Modèles lus depuis le volume persistant (toxicity/config.py : ARTIFACTS_DIR).
+            - name: model-cache
+              mountPath: /app/artifacts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "2"
+              # Mesuré : ~300-450 Mo par pod avec BERT et LSTM (kubectl top pods). 2 Gi laisse
+              # de la marge sous charge. LAYA (~3 Go au chargement) n'est pas servi par ce
+              # déploiement (ALLOWED_MODELS) : il gonflerait chaque pod pour un modèle peu utilisé.
+              memory: 2Gi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Système de fichiers en lecture seule (kube-linter) : seul /tmp est inscriptible.
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # À l'arrêt d'un pod (déploiement, réduction du nombre de pods), le load balancer met
+          # quelques secondes à cesser de lui envoyer du trafic. Sans cette pause, uvicorn
+          # s'arrête tout de suite et ces requêtes reçoivent une erreur 502.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "20"]
+          # Le chargement des modèles au démarrage peut prendre une minute.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 36 # 3 minutes max
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        - name: api-keys
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: toxic-api-keys
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+---
+# Autoscaling : de 3 à 15 pods selon le CPU (l'inférence PyTorch est limitée par le CPU).
+# 3 pods minimum : la perte d'un pod (panne, mise à jour) ne coupe pas le service.
+# Chaque pod réserve 2 CPU et 2 Gi : 3 pods = 6 CPU et 6 Gi facturés en permanence, 15 pods = 30 CPU.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: toxic-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: toxic-api
+  minReplicas: 3
+  # 15 (et non 10) : davantage de marge pour absorber une montée en charge soutenue (légitime
+  # ou attaque qui passe le filtre Cloud Armor). L'autoscaling reste une défense SECONDAIRE
+  # contre un flood court : un nouveau pod met 1 à 2 min à être prêt, donc il arrive après un
+  # pic bref. Les défenses PRIMAIRES sont le ban d'IP (Cloud Armor, avant le pod) et le
+  # délestage (503 via INFERENCE_QUEUE_TIMEOUT). Le scaling absorbe surtout une charge qui dure.
+  maxReplicas: 15
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # 60 % plutôt que 70 % : un nouveau pod met 1 à 2 min à être prêt (nœud Autopilot,
+          # chargement et préchauffage du modèle), il faut le demander avant la saturation.
+          averageUtilization: 60
+    # Scaling idéal : sur le nombre de requêtes en attente de créneau d'inférence
+    # (metrics_prom.QUEUE_WAITING -> toxic_api_queue_waiting), pour réagir AVANT que la file
+    # sature, plutôt que sur le CPU (qui ne monte qu'une fois les pods déjà saturés). Nécessite
+    # l'adaptateur de métriques custom de Google Managed Prometheus (non déployé ici) : laissé en
+    # commentaire tant que l'adaptateur n'est pas en place, sinon l'HPA reste bloqué sur une
+    # métrique "unknown". Voir attack/defense_changes.md.
+    # - type: Pods
+    #   pods:
+    #     metric:
+    #       name: toxic_api_queue_waiting
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "3"  # ajouter des pods quand > 3 requêtes en attente par pod en moyenne
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0 # réagir dès le premier dépassement
+      policies: # par tranche de 15 s : doubler le nombre de pods, ou au moins +4
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300 # évite de supprimer un pod qui a mis 1 min à démarrer
+---
+# Service interne, ciblé par l'Ingress (NEG : le load balancer envoie directement aux pods).
+apiVersion: v1
+kind: Service
+metadata:
+  name: toxic-api
+  annotations:
+    cloud.google.com/neg: '{"ingress": true}'
+    cloud.google.com/backend-config: '{"default": "toxic-api-backend"}'
+spec:
+  type: ClusterIP
+  selector:
+    app: toxic-api
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# Réglages du backend du load balancer : health check, timeout, Cloud Armor.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: toxic-api-backend
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: /health
+    port: 8080
+  timeoutSec: 120 # premier appel d'un modèle non préchargé (ex : LAYA) : chargement lent
+  # Logs du load balancer désactivés : ils contiennent l'IP des clients en clair. Le journal
+  # pseudonymisé de l'API les remplace. Les réactiver (enable: true) le temps d'une simulation
+  # d'attaque pour voir les requêtes bloquées par Cloud Armor, qui n'atteignent pas l'API.
+  logging:
+    enable: false
+  securityPolicy:
+    name: toxic-api-policy # limitation de débit par IP (créée avec gcloud)
+---
+# Certificat TLS géré par Google (le DNS du domaine doit pointer vers l'IP statique).
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: toxic-api-cert
+spec:
+  domains:
+    - DOMAIN
+---
+# Load balancer HTTPS global de Google, point d'entrée public de l'API.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: toxic-api
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: toxic-api-ip
+    networking.gke.io/managed-certificates: toxic-api-cert
+    # HTTP autorisé (port 80) faute de HTTPS : la clé d'API et le texte circulent EN CLAIR.
+    # Repasser à "false" dès que le certificat géré est actif.
+    kubernetes.io/ingress.allow-http: "true"
+spec:
+  defaultBackend:
+    service:
+      name: toxic-api
+      port:
+        number: 80

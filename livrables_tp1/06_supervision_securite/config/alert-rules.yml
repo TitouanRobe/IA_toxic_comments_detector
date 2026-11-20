@@ -1,0 +1,108 @@
+# Règles d'alerte Prometheus (SLO, saturation, sécurité, dérive du modèle).
+# Visibles dans Prometheus (onglet Alerts) et dans le tableau de bord Grafana.
+groups:
+  - name: toxic-api-slo
+    rules:
+      # Part des requêtes /model servies en moins d'1 s sur 5 min (même principe que le cours).
+      - record: slo:latency_under_1s_ratio
+        expr: |
+          sum(rate(toxic_api_request_duration_seconds_bucket{path="/model",le="1.0"}[5m]))
+          /
+          sum(rate(toxic_api_request_duration_seconds_count{path="/model"}[5m]))
+      - alert: LatencySLOViolated
+        expr: slo:latency_under_1s_ratio < 0.95
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "SLO latence violé : moins de 95 % des requêtes /model en moins d'1 s"
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(toxic_api_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(toxic_api_requests_total[5m])) > 0.01
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Plus de 1 % d'erreurs 5xx sur 5 min"
+
+  - name: toxic-api-saturation
+    rules:
+      - alert: OverloadShedding
+        expr: sum(rate(toxic_api_requests_total{path="/model",status="503"}[2m])) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Requêtes refusées pour surcharge (file d'attente pleine) : capacité insuffisante"
+
+      - alert: HighCPU
+        expr: rate(process_cpu_seconds_total{job="toxic-api"}[2m]) > 1.8
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Pod {{ $labels.pod }} au-delà de 90 % de ses 2 CPU depuis 5 min"
+
+      - alert: HighMemory
+        expr: process_resident_memory_bytes{job="toxic-api"} > 1.7e9
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Pod {{ $labels.pod }} au-delà de 1,7 Go de mémoire (limite 2 Gi) : risque d'arrêt OOM"
+
+  - name: toxic-api-availability
+    rules:
+      - alert: PodDown
+        expr: up{job="toxic-api"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Pod {{ $labels.pod }} ne répond plus aux collectes de métriques"
+
+      - alert: BelowMinReplicas
+        expr: count(up{job="toxic-api"} == 1) < 3
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Moins de 3 pods de l'API disponibles depuis 5 min"
+
+      - alert: ApiMetricsAbsent
+        expr: absent(up{job="toxic-api"} == 1)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Aucun pod de l'API ne répond : service probablement indisponible"
+
+  - name: toxic-api-security
+    rules:
+      # Beaucoup de clés refusées : tentative de deviner une clé, ou client mal configuré.
+      # L'IP pseudonymisée en cause se retrouve dans les logs (jsonPayload.event="auth_failed").
+      - alert: AuthFailureSpike
+        expr: sum(rate(toxic_api_requests_total{status="401"}[2m])) * 60 > 30
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Plus de 30 échecs d'authentification par minute : possible attaque par force brute"
+
+      # Appels massifs à des URL inexistantes : scan de vulnérabilités.
+      - alert: ScanDetected
+        expr: sum(rate(toxic_api_requests_total{path="other"}[5m])) * 60 > 20
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Plus de 20 requêtes/min vers des URL inconnues : probable scan"
+
+  - name: toxic-api-model
+    rules:
+      # Comportement anormal du modèle ou des entrées : part de textes jugés toxiques
+      # (score > 70) très élevée sur 15 min. Dérive des données, abus, ou modèle défaillant.
+      - alert: ToxicityRatioAnomaly
+        expr: |
+          1 - (
+            sum(rate(toxic_api_toxicity_score_bucket{le="70.0"}[15m]))
+            /
+            sum(rate(toxic_api_toxicity_score_count[15m]))
+          ) > 0.8
+        for: 15m
+        labels: {severity: info}
+        annotations:
+          summary: "Plus de 80 % des textes jugés toxiques depuis 15 min : dérive ou usage anormal"

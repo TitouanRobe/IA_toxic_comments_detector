@@ -1,0 +1,29 @@
+# Configuration Prometheus : collecte les métriques des pods de l'API toutes les 10 s.
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+scrape_configs:
+  # Pods de l'API, découverts automatiquement (y compris ceux ajoutés par l'autoscaling).
+  - job_name: toxic-api
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [default]
+        selectors:
+          - role: pod
+            label: app=toxic-api
+    relabel_configs:
+      # Ne garder que le port nommé "metrics" (pas le port HTTP de l'API ni les sidecars).
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: metrics
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
