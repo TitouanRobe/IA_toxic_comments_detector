@@ -236,3 +236,6 @@ loadtest/.api_key
 
 # Fichiers système macOS
 .DS_Store
+
+# Variables de déploiement locales (copie de deploy.env.example)
+deploy.env

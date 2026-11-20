@@ -1,17 +1,21 @@
-"""Anonymise data/train.csv : remplace les données personnelles par des pseudonymes
+"""Anonymise data/<split>.csv : remplace les données personnelles par des pseudonymes
 cohérents au sein d'un même commentaire (ex: [PERSON_1], [PERSON_2], [EMAIL_1]).
 
-- spaCy NER  : PERSON, ORG, FAC  -> anonymisés
-               NORP, GPE, LOC    -> conservés (signal utile pour la détection de toxicité)
+- spaCy NER  : PERSON, FAC        -> anonymisés
+               NORP, GPE, LOC, ORG -> conservés (signal utile pour la détection de toxicité)
 - Regex      : EMAIL, URL, IP_ADDRESS, PHONE, IBAN, CREDIT_CARD, ADDRESS, USERNAME -> anonymisés
 
+Entrée : data/<split>.csv ; sortie : data/<split>_anonymized.csv (colonne comment_text remplacée).
+
 Usage :
-    python anonymize.py            # tout le fichier (cache si le résultat existe déjà)
-    python anonymize.py 2000       # test rapide sur 2000 lignes (écrit un fichier d'échantillon)
+    uv run python anonymize.py                    # train : tout le fichier (cache si déjà calculé)
+    uv run python anonymize.py --split test       # test
+    uv run python anonymize.py --limit 2000       # test rapide (écrit data/<split>_anonymized_sample.csv)
+    uv run python anonymize.py --force            # recalcule même si la sortie existe
 """
 
+import argparse
 import re
-import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -20,11 +24,6 @@ import polars as pl
 import spacy
 
 DATA_DIR = Path(__file__).parent / "data"
-CSV_PATH = DATA_DIR / "test.csv"
-OUTPUT_PATH = DATA_DIR / "test_anonymized.csv"
-SAMPLE_PATH = DATA_DIR / "test_anonymized_sample.csv"
-
-FORCE_RECOMPUTE = False  # True pour ignorer le cache
 KEEP_ORIGINAL = False  # True pour garder comment_text (non anonymisé) dans le CSV de sortie
 
 # Labels spaCy à anonymiser (NORP, GPE, LOC volontairement conservés)
@@ -168,14 +167,15 @@ def residual_leaks(anonymized: list[str]) -> Counter:
     return leaks
 
 
-def main(limit: int | None = None) -> None:
-    output = SAMPLE_PATH if limit else OUTPUT_PATH
+def main(split: str = "train", limit: int | None = None, force: bool = False) -> None:
+    source = DATA_DIR / f"{split}.csv"
+    output = DATA_DIR / (f"{split}_anonymized_sample.csv" if limit else f"{split}_anonymized.csv")
 
-    if output.exists() and not limit and not FORCE_RECOMPUTE:
-        print(f"Cache trouvé : {output} (pas de recalcul)")
+    if output.exists() and not limit and not force:
+        print(f"Cache trouvé : {output} (pas de recalcul, --force pour recalculer)")
         return
 
-    df = pl.read_csv(CSV_PATH)
+    df = pl.read_csv(source)
     if limit:
         df = df.head(limit)
 
@@ -201,4 +201,9 @@ def main(limit: int | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]) if len(sys.argv) > 1 else None)
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--split", choices=["train", "test"], default="train")
+    p.add_argument("--limit", type=int, default=None, help="n'anonymiser que les N premières lignes")
+    p.add_argument("--force", action="store_true", help="recalculer même si la sortie existe")
+    args = p.parse_args()
+    main(args.split, args.limit, args.force)

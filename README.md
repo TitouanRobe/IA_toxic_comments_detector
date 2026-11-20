@@ -1,368 +1,435 @@
-# IA_toxic_comments_detector
+# Digital Social Score — détection de commentaires toxiques
 
-Détection de toxicité : chaque texte reçoit un **score de 0 à 100** (= 100 × probabilité maximale parmi les 6 classes Jigsaw : `toxic`, `severe_toxic`, `obscene`, `threat`, `insult`, `identity_hate`).
-
-## Installation
+API d'IA qui indique si un commentaire est toxique, entraînée sur des données **anonymisées par NER**, déployée sur **Google Cloud (GKE Autopilot)** avec authentification, protection contre les abus, supervision Prometheus / Grafana, tests de charge et pipeline DevSecOps.
 
 ```bash
-uv sync   # inférence + groupes "train" (spaCy, polars, scikit-learn) et "dev"
+curl -X POST http://<adresse-de-l-api>/model -H "Content-Type: application/json" \
+     -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
+# {"is_toxic": true}
 ```
 
-- **Windows (RTX 5080)** : torch est installé depuis l'index PyTorch CUDA 13.0 (compatible driver CUDA 13.2). Vérifier : `uv run python -c "import torch; print(torch.cuda.get_device_name())"`.
-- **Mac (M3)** : torch PyPI, entraînement sur MPS.
-
-## Utilisation
-
-```bash
-# Test rapide (Mac)
-uv run python train.py --model bert --limit 2000 --epochs 1 --max-length 128 --test-limit 1000
-
-# Entraînement complet (Windows / GPU)
-uv run python train.py --model bert
-
-# LSTM (BiLSTM entraîné from scratch, batch 128 et lr 1e-3 par défaut)
-uv run python train.py --model lstm --limit 2000 --epochs 1 --max-length 128 --test-limit 1000   # test rapide Mac
-uv run python train.py --model lstm --epochs 5                                                     # complet (Windows / GPU)
-
-# LAYA (encodeur ModernBERT-large de convaiinnovations/laya + tête 6 classes, batch 16 et lr 1e-5 par défaut)
-# ~840 Mo téléchargés au premier lancement (cache Hugging Face) ; lent sur Mac, GPU conseillé.
-uv run python train.py --model laya --limit 2000 --epochs 1 --max-length 128 --test-limit 1000   # test rapide Mac
-uv run python train.py --model laya --epochs 2                                                     # complet (Windows / GPU)
-
-# Score d'un texte
-uv run python predict.py --model bert "You are an idiot"
-
-# Comparaison des modèles entraînés
-uv run python compare.py
-
-# API d'inférence (documentation interactive : http://127.0.0.1:8000/docs, avec ENABLE_DOCS=1 ;
-# désactivée par défaut et en production)
-uv run python make_api_key.py          # affiche une clé (pour le client) et son empreinte (pour l'API)
-ENABLE_DOCS=1 API_KEY_HASHES=<empreinte> uv run uvicorn api:app --reload
-curl -X POST http://127.0.0.1:8000/model -H "Content-Type: application/json" \
-     -H "X-API-Key: <clé>" -d '{"text": "You are an idiot", "model": "bert"}'
-```
-
-### Authentification (clé d'API)
-
-`POST /model` exige le header `X-API-Key`, sinon réponse `401`. `/health` reste public (sondes Kubernetes, health check du load balancer). Dans `/docs` (avec `ENABLE_DOCS=1`), le bouton **Authorize** permet de saisir la clé.
-
-- **Seules les empreintes sont stockées** : `make_api_key.py` génère une clé aléatoire (`dss_…`, 256 bits) et son empreinte SHA-256. Le client reçoit la clé, l'API ne connaît que l'empreinte (`API_KEY_HASHES`, ou le fichier `API_KEY_HASHES_FILE` monté depuis Secret Manager). Une fuite du secret ne donne donc aucune clé utilisable. Une clé mise par erreur à la place d'une empreinte fait échouer le démarrage.
-- **Une empreinte par client**, séparées par des virgules ou des retours à la ligne : on peut révoquer un seul client, ou garder ancienne et nouvelle clé pendant une rotation.
-- **Comparaison en temps constant** (`hmac.compare_digest`) : le temps de réponse ne renseigne pas sur la clé.
-- **Échec fermé** : sans clé configurée, l'API refuse de démarrer ; `AUTH_DISABLED=1` désactive l'authentification, en local uniquement.
-- **Limite** : adapté à un nombre de clients raisonnable (une clé par application cliente). Pour des millions d'utilisateurs finaux, passer à des JWT émis par un fournisseur d'identité (Identity Platform, Auth0...).
-
-### Chiffrement
-
-| Donnée | En transit | Au repos |
-|---|---|---|
-| Texte analysé | HTTP (choix du projet, pas de HTTPS) : le texte circule en clair entre le client et le load balancer ; load balancer → pod dans le réseau Google, chiffré au niveau réseau par Google | Jamais stocké : ni base, ni logs applicatifs, pas dans l'URL ; `Cache-Control: no-store` sur les réponses |
-| Clé d'API | Header `X-API-Key`, en clair en HTTP (HTTPS recommandé en production réelle) | Nulle part : seule son empreinte SHA-256 est stockée, dans Secret Manager (chiffré AES-256 par Google, accès IAM restreint, tracé) |
-| Modèles (image) | Push/pull en HTTPS vers Artifact Registry | Chiffrés par Google dans Artifact Registry |
-
-L'API est exposée en HTTP simple : l'en-tête `Strict-Transport-Security` (HSTS) est envoyé mais sans effet tant que le service n'est pas en HTTPS.
-
-### Journal d'accès pseudonymisé
-
-Chaque requête produit une ligne JSON sur la sortie standard (`toxicity/audit_log.py`), récupérée par Cloud Logging :
-
-```json
-{"timestamp": "2026-11-12T10:42:03.512+00:00", "severity": "INFO", "message": "POST /model 200",
- "event": "request", "request_id": "9f2c41d07a6b4e15", "method": "POST", "path": "/model", "status": 200,
- "latency_ms": 84.2, "client": "client_5b1e0c9a3f2d7e64", "ip": "ip_c07d18a2e94b3f51",
- "model": "bert", "text_length": 16, "toxicity_score": 99.9}
-```
-
-- **Jamais journalisé** : le texte analysé, la clé d'API, l'IP en clair. Le journal d'accès d'uvicorn (`--no-access-log`) et les logs du load balancer (`BackendConfig`) sont désactivés, car ils contiennent les IP en clair.
-- **Pseudonymes** : `client` et `ip` sont des HMAC-SHA256 avec une clé secrète (`toxic-api-log-key` dans Secret Manager). Irréversibles sans la clé, mais stables : on peut suivre l'activité d'un client ou d'une IP (abus, échecs d'authentification répétés) sans savoir qui c'est.
-- **Événements** : `request` (INFO, ou WARNING/ERROR selon le statut) et `auth_failed` (401, WARNING). `/health` n'est journalisé qu'en cas d'erreur.
-- **`X-Request-ID`** : renvoyé dans chaque réponse, il permet à un client de signaler une requête précise.
-- **Conservation** : 30 jours (bucket `_Default` de Cloud Logging).
-
-Exemples de recherche dans Cloud Logging (**Logging > Explorateur de journaux**) :
-
-```
-resource.type="k8s_container" AND resource.labels.container_name="toxic-api"
-jsonPayload.event="auth_failed"                    # tentatives avec une clé invalide
-jsonPayload.ip="ip_c07d18a2e94b3f51"               # toute l'activité d'une même IP
-jsonPayload.latency_ms > 1000                      # requêtes lentes
-```
-
-`POST /model` avec un corps JSON `{"text": "...", "model": "bert"}` (`model` optionnel, `bert` par défaut ; `text` limité à 1500 caractères) renvoie :
-- `is_toxic` : `true` si le score de la classe `toxic` est > 70.
-
-Seule la décision est renvoyée : les scores restent côté serveur (journal, métriques), pour ne pas faciliter la copie du modèle.
-
-Sorties : `artifacts/<modèle>/` (poids) et `results/<modèle>/metrics.json` (métriques).
-
-`compare.py` affiche, pour chaque modèle, sur le jeu de test :
-- **AUC moy** : ROC-AUC moyenne des 6 classes (critère du meilleur modèle) ;
-- **précision / rappel / F1@50** : décision binaire « toxique si score ≥ 50 » ;
-- **ms/comm.** : temps de traitement moyen d'un commentaire (inférence sur tout le test, tokenisation comprise) ;
-- **train (s)** : durée d'entraînement ;
-- puis la ROC-AUC par classe.
-
-Les temps ne sont comparables qu'entre modèles évalués sur le même matériel.
-
-## Déploiement (Docker / GKE)
-
-L'image ne contient que l'API et les dépendances d'inférence (`dependencies` du `pyproject.toml`) :
-PyTorch CPU, sans le groupe `train` (spaCy, polars, scikit-learn) ni `data/` (voir `.dockerignore`).
-Les poids des modèles **ne sont pas dans l'image** : ils sont sur un **volume persistant** (bucket Cloud Storage `<projet>-toxic-models`, monté dans `/app/artifacts` via un `PersistentVolumeClaim`). L'image reste légère (build et push rapides), et mettre à jour un modèle ne demande pas de reconstruire l'image.
-
-Le déploiement est décrit dans [k8s/toxic-api.yaml](k8s/toxic-api.yaml) :
-
-| Objet | Rôle |
+| | |
 |---|---|
-| `Deployment` | Pods de l'API : 2 CPU, 2 Gi, non-root, sondes sur `/health` ; modèles servis : `bert`, `lstm` (`ALLOWED_MODELS`) |
-| `HorizontalPodAutoscaler` | 3 à 15 pods, cible 60 % de CPU |
-| `Service` | Point d'accès interne aux pods, ciblé par l'Ingress |
-| `Ingress` + `ManagedCertificate` | Load balancer public, HTTP autorisé (port 80) ; certificat géré par Google prévu pour passer en HTTPS |
-| `ServiceAccount` + `SecretProviderClass` | Identité de l'API (Workload Identity) et montage des empreintes de clés depuis Secret Manager |
-| `PersistentVolume` + `PersistentVolumeClaim` (`model-cache`) | Stockage persistant des modèles : bucket Cloud Storage monté en lecture seule par tous les pods (pilote GCS FUSE) |
-| `BackendConfig` | Health check, timeout de 120 s, politique Cloud Armor |
+| **Modèle servi** | DistilBERT affiné (ROC-AUC moyenne 0,985 sur 6 classes), BiLSTM en option rapide |
+| **Données** | Jigsaw Toxic Comment (Wikipedia), 159 571 commentaires d'entraînement, pseudonymisés avant entraînement |
+| **Hébergement** | GKE Autopilot, région UE (`europe-west1`), 3 à 15 pods, load balancer + Cloud Armor |
+| **Livrables** | TP1 : [livrables_tp1/](livrables_tp1/) · TP2 (attaque, défense, IA Act, DevSecOps) : [livrable_tp2/](livrable_tp2/) |
+
+## Sommaire
+
+1. [Architecture](#1-architecture)
+2. [Organisation du code](#2-organisation-du-code)
+3. [Prérequis](#3-prérequis)
+4. [Démarrage rapide en local](#4-démarrage-rapide-en-local-10-min-sans-cloud)
+5. [Données, anonymisation et modèles](#5-données-anonymisation-et-modèles)
+6. [L'API](#6-lapi)
+7. [Sécurité et RGPD](#7-sécurité-et-rgpd)
+8. [Déploiement sur Google Cloud](#8-déploiement-sur-google-cloud)
+9. [Supervision et observabilité](#9-supervision-et-observabilité)
+10. [Tests de charge](#10-tests-de-charge)
+11. [Attaque et défense (TP2)](#11-attaque-et-défense-tp2)
+12. [Pipeline CI/CD DevSecOps](#12-pipeline-cicd-devsecops)
+13. [Choix techniques et alternatives](#13-choix-techniques-et-alternatives)
+14. [Résultats clés et pistes d'amélioration](#14-résultats-clés-et-pistes-damélioration)
+15. [Coûts, arrêt et suppression](#15-coûts-arrêt-et-suppression)
+16. [Dépannage](#16-dépannage)
+
+---
+
+## 1. Architecture
+
+![Schéma de l'infrastructure](docs/architecture/architecture-cloud.svg)
+
+Un client envoie un texte en HTTP au **load balancer Google**, où **Cloud Armor** filtre les abus (débit par IP, ban, taille des requêtes). Le load balancer route vers les **pods de l'API** (FastAPI + PyTorch CPU), qui vérifient la clé d'API, appliquent leurs propres limites et renvoient la décision du modèle. Les poids des modèles sont lus depuis **Cloud Storage** (lecture seule), les secrets depuis **Secret Manager** (Workload Identity, sans clé stockée dans le cluster), les journaux pseudonymisés partent vers **Cloud Logging**, et **Prometheus / Grafana** supervisent le tout depuis un namespace non exposé.
+
+Description complète (flux numérotés, chiffrement, IAM, zero trust, légende) : [docs/architecture/ARCHITECTURE_CLOUD.md](docs/architecture/ARCHITECTURE_CLOUD.md). Source éditable du schéma : [architecture-cloud.excalidraw](docs/architecture/architecture-cloud.excalidraw).
+
+## 2. Organisation du code
+
+```
+├── api.py                    API FastAPI : /model (inférence), /health ; défenses (voir §7)
+├── train.py · evaluate.py    entraînement, évaluation sur le jeu de test
+├── compare.py · predict.py   comparaison des modèles, score d'un texte en ligne de commande
+├── count_entities.py         repérage des données personnelles (spaCy + regex)
+├── anonymize.py              pseudonymisation par NER + regex
+├── clean_text.py             nettoyage après anonymisation
+├── make_api_key.py           génération d'une clé d'API et de son empreinte
+├── toxicity/                 bibliothèque du projet
+│   ├── models/               BERT, LSTM, LAYA (interface commune ToxicityModel, registre)
+│   ├── data.py · config.py   chargement des jeux de données, paramètres
+│   ├── audit_log.py          journal d'accès JSON pseudonymisé (HMAC)
+│   ├── metrics_prom.py       métriques Prometheus
+│   └── body_limit.py · ip_limit.py · fair_queue.py   défenses anti-abus de l'API
+├── k8s/                      manifeste GKE, script Cloud Armor, supervision (k8s/monitoring/)
+├── loadtest/                 tests de charge Locust (scénarios dans config.toml)
+├── attack/                   attaque DoS, banc avant / après défense, analyses (TP2)
+├── tests/ · ci/              tests pytest des défenses, contrôle de la model card
+├── .github/workflows/        pipeline DevSecOps
+├── data/                     jeu Jigsaw brut, anonymisé et nettoyé (versionné)
+├── docs/architecture/        schéma et description de l'infrastructure
+├── model_card.json           fiche du modèle (IA Act)
+├── REGISTRE_TRAITEMENT.md    registre RGPD (article 30)
+└── API.md                    documentation de l'API
+```
+
+Chaque modèle implémente la même interface (`fit`, `predict_proba`, `save`, `load`) : `train.py`, `evaluate.py`, `predict.py` et l'API fonctionnent avec n'importe lequel. Ajouter un modèle : créer `toxicity/models/<nom>.py` (classe héritant de `ToxicityModel`), l'enregistrer dans `toxicity/models/registry.py`, puis `train.py --model <nom>`.
+
+## 3. Prérequis
+
+| Outil | Pour quoi | Installation |
+|---|---|---|
+| **git** | Récupérer le projet | — |
+| **uv** ≥ 0.10 | Python 3.12 et toutes les dépendances, versions figées par `uv.lock` | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
+| Docker | Construire l'image (déploiement) | [docker.com](https://www.docker.com/) ; ou Cloud Build, sans Docker local |
+| Google Cloud SDK (`gcloud`) + `kubectl` | Déploiement sur GCP | [cloud.google.com/sdk](https://cloud.google.com/sdk/docs/install), puis `gcloud components install kubectl` |
+| Un projet GCP avec facturation | Déploiement | Rôle Owner (ou Editor + Security Admin) sur le projet |
+
+Python n'a pas à être installé : `uv` télécharge la bonne version. PyTorch est choisi automatiquement selon la machine : CUDA 13.0 sur Windows (GPU NVIDIA), CPU sur Linux, MPS sur Mac (voir `[tool.uv.sources]` dans [pyproject.toml](pyproject.toml)).
+
+## 4. Démarrage rapide en local (~10 min, sans cloud)
 
 ```bash
-# Test local (sur Mac Apple Silicon, --platform est nécessaire : les nœuds GKE sont en amd64)
-docker build --platform linux/amd64 -t toxic-api .
-docker run --rm -p 8080:8080 -e API_KEY_HASHES=<empreinte> toxic-api
-curl localhost:8080/health
+git clone https://github.com/TitouanRobe/IA_toxic_comments_detector.git
+cd IA_toxic_comments_detector
+uv sync                          # dépendances (API + entraînement + outils de dev)
+uv run pytest                    # tests des défenses de l'API (sans modèle, ~5 s)
 
-# Publication dans Artifact Registry (région Paris)
-REGION=europe-west1; PROJECT=shopflow-cleo-maelle
+# Un modèle de démonstration (quelques minutes sur CPU ; entraînement complet : §5)
+uv run python train.py --model bert --limit 2000 --epochs 1 --max-length 128 --test-limit 1000
+uv run python predict.py --model bert "You are an idiot" "Thanks for your help"
+
+# Lancer l'API avec une clé d'API
+uv run python make_api_key.py    # affiche une clé (pour le client) et son empreinte (pour l'API)
+ENABLE_DOCS=1 API_KEY_HASHES=<empreinte> uv run uvicorn api:app --port 8000
+```
+
+Dans un second terminal :
+
+```bash
+curl http://127.0.0.1:8000/health
+curl -X POST http://127.0.0.1:8000/model -H "Content-Type: application/json" \
+     -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
+```
+
+Documentation interactive : http://127.0.0.1:8000/docs (bouton **Authorize** pour la clé ; uniquement avec `ENABLE_DOCS=1`). Sous Windows (PowerShell), définir les variables avant la commande : `$env:API_KEY_HASHES="<empreinte>"; $env:ENABLE_DOCS="1"`.
+
+## 5. Données, anonymisation et modèles
+
+Les fichiers du jeu [Jigsaw Toxic Comment Classification](https://www.kaggle.com/c/jigsaw-toxic-comment-classification-challenge) sont versionnés dans `data/`, avec leurs versions anonymisées et nettoyées : toutes les étapes ci-dessous peuvent être sautées pour aller directement à l'entraînement. Chaque script ne recalcule pas un résultat déjà présent (option `--force` pour `anonymize.py`).
+
+| Étape | Commande | Entrée → sortie |
+|---|---|---|
+| 1. Repérer les données personnelles | `uv run python count_entities.py` | `train.csv` → `train_entities.csv`, `train_entities_totals.csv` |
+| 2. Pseudonymiser (NER spaCy + regex) | `uv run python anonymize.py --split train` puis `--split test` | `<split>.csv` → `<split>_anonymized.csv` |
+| 3. Nettoyer (casse, ponctuation, emojis) | `uv run python clean_text.py --split train` puis `--split test` | `<split>_anonymized.csv` → `<split>_clean.csv` |
+| 4. Entraîner | `uv run python train.py --model bert` (GPU conseillé) · `--model lstm --epochs 5` · `--model laya --epochs 2` | `train_clean.csv` → `artifacts/<modèle>/`, `results/<modèle>/metrics.json` |
+| 5. Évaluer sur le test anonymisé | `uv run python evaluate.py --limit 5000` | `artifacts/` + `test_clean.csv` → `results/<modèle>/metrics_test_clean.json` |
+| 6. Comparer | `uv run python compare.py` | tableau ROC-AUC, précision, rappel, F1, temps |
+
+**Anonymisation.** Personnes, lieux précis, emails, URL, IP, téléphones, IBAN, cartes, adresses et pseudonymes `User:` sont remplacés par des pseudonymes typés et numérotés par commentaire (`[PERSON_1]`) ; nationalités, groupes et organisations sont conservés car ils portent le signal de la classe `identity_hate`. Les regex sont relancées sur le texte anonymisé pour détecter des fuites résiduelles. 40 % des commentaires d'entraînement sont modifiés. Détail et justification : [livrables_tp1/01_donnees/ANONYMISATION.md](livrables_tp1/01_donnees/ANONYMISATION.md).
+
+**Modèles.** Trois architectures comparées sur 5 000 commentaires du test anonymisé ([livrables_tp1/02_modeles/COMPARAISON_MODELES.md](livrables_tp1/02_modeles/COMPARAISON_MODELES.md)) :
+
+| Modèle | ROC-AUC moyenne | Temps par commentaire | En production |
+|---|---|---|---|
+| **BERT** (DistilBERT affiné) | **0,985** | ~30 ms | **Oui, par défaut** : meilleur compromis qualité / coût |
+| LSTM (BiLSTM entraîné de zéro) | 0,976 | ~1-2 ms | Oui, `"model": "lstm"`, repli rapide |
+| LAYA (ModernBERT-large) | 0,985 | > 10 × BERT | Non : ~3 Go de mémoire par pod pour aucun gain de ROC-AUC |
+
+## 6. L'API
+
+| Endpoint | Rôle | Authentification |
+|---|---|---|
+| `POST /model` | `{"text": "...", "model": "bert"}` → `{"is_toxic": true}` (classe `toxic` > 70 %) | Clé `X-API-Key` |
+| `GET /health` | État et modèles chargés (sondes Kubernetes, load balancer) | Publique |
+
+Seule la décision est renvoyée : les scores restent côté serveur (journal, métriques), pour ne pas permettre de copier le modèle. Codes d'erreur, exemples et limites : [API.md](API.md).
+
+Principales variables d'environnement (liste complète en tête de [api.py](api.py)) :
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `API_KEY_HASHES` / `API_KEY_HASHES_FILE` | — | Empreintes SHA-256 des clés acceptées (sans clé, l'API refuse de démarrer) |
+| `LOG_PSEUDONYM_KEY` / `_FILE` | aléatoire | Clé HMAC de pseudonymisation des journaux |
+| `PRELOAD_MODELS` · `ALLOWED_MODELS` | `bert` · tous | Modèles chargés et préchauffés au démarrage · modèles servis |
+| `MAX_QUEUE_LENGTH` · `INFERENCE_QUEUE_TIMEOUT` | `8` · `2` s | Délestage : file d'attente par pod, attente maximale avant `503` |
+| `MAX_IN_FLIGHT_PER_IP` | `4` | Requêtes simultanées par IP et par pod avant `429` (`0` pour désactiver) |
+| `ENABLE_DOCS` · `AUTH_DISABLED` | désactivés | `/docs` · authentification désactivée (local uniquement) |
+
+## 7. Sécurité et RGPD
+
+| Exigence | Mise en œuvre | Détail |
+|---|---|---|
+| **Anonymisation / pseudonymisation** | NER spaCy + regex avant entraînement ; journaux pseudonymisés par HMAC-SHA256 (client, IP) | §5, [toxicity/audit_log.py](toxicity/audit_log.py) |
+| **Minimisation** | Texte analysé jamais stocké ni journalisé ; IP jamais en clair ; journaux conservés 30 jours | [REGISTRE_TRAITEMENT.md](REGISTRE_TRAITEMENT.md) |
+| **Authentification** | Clé d'API de 256 bits ; seule son empreinte est stockée (Secret Manager) ; comparaison en temps constant ; échec fermé | [livrables_tp1/04_securite_rgpd/SECURITE.md](livrables_tp1/04_securite_rgpd/SECURITE.md) |
+| **IAM** | Workload Identity : une identité par composant, droits minimaux (l'API lit 2 secrets et 1 bucket, rien d'autre) ; aucune clé de compte de service | [ARCHITECTURE_CLOUD.md §4](docs/architecture/ARCHITECTURE_CLOUD.md) |
+| **Chiffrement** | Au repos : Secret Manager, Cloud Storage, Artifact Registry, Cloud Logging (AES-256, Google). En transit : réseau Google entre load balancer et pods ; certificat HTTPS géré prévu dans le manifeste | Voir la limite ci-dessous |
+| **Protection contre les abus** | Cloud Armor (100 req/min par IP, ban 10 min au-delà de 200, corps > 4 Ko rejetés) ; dans l'API : plafond par IP, file équitable, délestage rapide, limites de taille, en-têtes de sécurité, docs fermées | [livrable_tp2/3_defense.md](livrable_tp2/3_defense.md) |
+| **Conteneurs** | Non-root, système de fichiers en lecture seule, capabilities retirées, modèles montés en lecture seule | [k8s/toxic-api.yaml](k8s/toxic-api.yaml) |
+| **Conformité** | Registre RGPD (art. 30), hébergement UE, fiche IA Act (risque minimal), model card vérifiée par la CI | [REGISTRE_TRAITEMENT.md](REGISTRE_TRAITEMENT.md), [livrable_tp2/4_fiche_ia_act.md](livrable_tp2/4_fiche_ia_act.md), [model_card.json](model_card.json) |
+
+> **Limite assumée : l'API publique est servie en HTTP.** La clé et le texte circulent en clair entre le client et le load balancer. Pour passer en HTTPS : pointer un domaine vers l'IP (ou utiliser `<IP>.sslip.io`), attendre que le certificat géré soit `Active` (§8), puis mettre `kubernetes.io/ingress.allow-http: "false"` dans le manifeste.
+
+## 8. Déploiement sur Google Cloud
+
+Toutes les commandes sont paramétrées par [deploy.env.example](deploy.env.example) : rien n'est propre à notre projet. Elles s'exécutent dans un terminal bash (Linux, Mac, Git Bash ou Cloud Shell), depuis la racine du dépôt. Prévoir **~30 min** la première fois.
+
+**8.1 Configuration (une fois)**
+
+```bash
+gcloud auth login
+cp deploy.env.example deploy.env      # puis éditer PROJECT (et REGION)
+source deploy.env                     # à refaire dans chaque nouveau terminal
+gcloud services enable container.googleapis.com artifactregistry.googleapis.com \
+  compute.googleapis.com secretmanager.googleapis.com
+```
+
+**8.2 Infrastructure (une fois)**
+
+```bash
+# Registre d'images, cluster Autopilot (5 à 10 min), IP publique
 gcloud artifacts repositories create toxic --repository-format=docker --location=$REGION
-gcloud auth configure-docker $REGION-docker.pkg.dev
-# Tag unique à chaque build (date-heure) : ne jamais repousser un tag existant, un nœud qui
-# l'a déjà en cache garderait l'ancienne image.
-TAG=$(date +%Y%m%d-%H%M); IMAGE=$REGION-docker.pkg.dev/$PROJECT/toxic/toxic-api:$TAG
-docker build --platform linux/amd64 -t $IMAGE . && docker push $IMAGE
-
-# Cluster GKE Autopilot (une seule fois)
-gcloud container clusters create-auto toxic-cluster --region $REGION
-gcloud container clusters get-credentials toxic-cluster --region $REGION
-
-# IP publique statique (globale, exigée par l'Ingress) : faire pointer le DNS du domaine dessus (enregistrement A)
+gcloud container clusters create-auto $CLUSTER --region $REGION
+gcloud container clusters update $CLUSTER --region $REGION --enable-secret-manager
+gcloud container clusters get-credentials $CLUSTER --region $REGION
 gcloud compute addresses create toxic-api-ip --global
-IP=$(gcloud compute addresses describe toxic-api-ip --global --format 'value(address)')
-# Sans nom de domaine : sslip.io résout <IP>.sslip.io vers <IP>, sans configuration DNS.
-# Avec un domaine à soi : DOMAIN=api.mondomaine.fr et un enregistrement A vers $IP.
-DOMAIN=$IP.sslip.io; echo $DOMAIN
+source deploy.env && echo "API : http://$DOMAIN"     # recalcule IP et DOMAIN
 
-# Cloud Armor (politique "toxic-api-policy", relançable) : 100 requêtes / minute / IP puis 429,
-# IP bannie 10 min au-delà de 200 req/min, corps de plus de 4096 octets rejetés (403).
+# Cloud Armor : politique "toxic-api-policy" (script relançable)
 bash k8s/cloud-armor-setup.sh
 
-# Clé d'API : la clé est donnée au client (la noter, elle n'est affichée qu'ici) ;
-# seule son empreinte va dans Google Secret Manager (stocké en Europe).
-gcloud services enable secretmanager.googleapis.com
+# Secrets : empreinte de la clé d'API (noter la CLÉ affichée, elle n'est montrée qu'une fois)
+# et clé de pseudonymisation des journaux, stockées dans la région choisie
 uv run python make_api_key.py
 printf '%s' "<empreinte>" | gcloud secrets create toxic-api-keys \
   --replication-policy=user-managed --locations=$REGION --data-file=-
-
-# Clé de pseudonymisation des logs (aléatoire, personne n'a besoin de la connaître)
 openssl rand -hex 32 | tr -d '\n' | gcloud secrets create toxic-api-log-key \
   --replication-policy=user-managed --locations=$REGION --data-file=-
 
-# Module Secret Manager de GKE : monte les secrets en fichiers dans le pod (une seule fois)
-gcloud container clusters update toxic-cluster --region $REGION --enable-secret-manager
-
-# IAM : seul le compte de service Kubernetes "toxic-api" (Workload Identity) peut lire ces secrets
-PROJECT_NUMBER=$(gcloud projects describe $PROJECT --format 'value(projectNumber)')
-for SECRET in toxic-api-keys toxic-api-log-key; do
-  gcloud secrets add-iam-policy-binding $SECRET --role=roles/secretmanager.secretAccessor \
-    --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT.svc.id.goog/subject/ns/default/sa/toxic-api"
-done
-
-# Stockage persistant des modèles : bucket en Europe, privé, lisible uniquement par l'API
+# Modèles : bucket privé en UE ; artifacts/ doit contenir les modèles entraînés (§5)
 gcloud storage buckets create gs://$PROJECT-toxic-models --location=$REGION \
   --uniform-bucket-level-access --public-access-prevention
-gcloud storage cp -r artifacts/bert artifacts/lstm artifacts/laya gs://$PROJECT-toxic-models/
-gcloud storage buckets add-iam-policy-binding gs://$PROJECT-toxic-models --role=roles/storage.objectViewer \
-  --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT.svc.id.goog/subject/ns/default/sa/toxic-api"
+gcloud storage cp -r artifacts/bert artifacts/lstm gs://$PROJECT-toxic-models/
 
-# Déploiement : REGION, PROJECT_ID et DOMAIN du manifest remplacés
-# (la première ligne s'arrête avec une erreur si l'une des variables est vide)
-: "${REGION:?}" "${PROJECT:?}" "${DOMAIN:?}" "${TAG:?}"
+# IAM : seul le compte de service Kubernetes de l'API lit ces secrets et ce bucket
+for SECRET in toxic-api-keys toxic-api-log-key; do
+  gcloud secrets add-iam-policy-binding $SECRET --role=roles/secretmanager.secretAccessor \
+    --member="$WI/default/sa/toxic-api"
+done
+gcloud storage buckets add-iam-policy-binding gs://$PROJECT-toxic-models \
+  --role=roles/storage.objectViewer --member="$WI/default/sa/toxic-api"
+```
+
+**8.3 Image et déploiement (à chaque nouvelle version)**
+
+```bash
+source deploy.env
+TAG=$(date +%Y%m%d-%H%M)              # tag unique : ne jamais réutiliser un tag
+gcloud auth configure-docker $REGION-docker.pkg.dev
+docker build --platform linux/amd64 -t $REPO/toxic-api:$TAG . && docker push $REPO/toxic-api:$TAG
+#   sans Docker : gcloud builds submit --tag $REPO/toxic-api:$TAG
+
+: "${REGION:?}" "${PROJECT:?}" "${DOMAIN:?}" "${TAG:?}"   # s'arrête si une variable est vide
 sed -e "s/REGION/$REGION/" -e "s/PROJECT_ID/$PROJECT/" -e "s/DOMAIN/$DOMAIN/" -e "s/IMAGE_TAG/$TAG/" \
   k8s/toxic-api.yaml | kubectl apply -f -
 kubectl rollout status deployment/toxic-api
-kubectl describe managedcertificate toxic-api-cert   # attendre "Status: Active" (jusqu'à ~1 h)
+```
 
-# Appel
+**8.4 Vérification**
+
+```bash
+kubectl get pods,hpa -l app=toxic-api           # 3 pods Running
+curl http://$DOMAIN/health                       # {"status":"ok",...} (load balancer prêt en ~5 min)
 curl -X POST http://$DOMAIN/model -H "Content-Type: application/json" \
   -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
+curl -s -o /dev/null -w "%{http_code}\n" http://$DOMAIN/docs     # 404 : docs fermées
+kubectl describe managedcertificate toxic-api-cert                # HTTPS : attendre "Active"
 ```
 
-**API déployée** : `http://136.82.246.21/` (IP publique statique, HTTP).
+**8.5 Opérations courantes**
 
-```bash
-curl http://136.82.246.21/health
-curl -X POST http://136.82.246.21/model -H "Content-Type: application/json" \
-  -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
-```
-
-- **Nouvelle version** : nouveau `TAG`, build et push, puis la commande `sed … | kubectl apply` ci-dessus. Le changement de tag suffit à déclencher le déploiement (pas besoin de `rollout restart`). Retour arrière : relancer l'`apply` avec l'ancien `TAG`.
-- **Sans domaine** (test) : `kubectl port-forward svc/toxic-api 8080:80` puis `curl localhost:8080/health`. Le certificat géré ne s'active pas sans DNS valide.
-- **Autoscaling** : `kubectl get hpa toxic-api` montre la charge et le nombre de pods. Chaque pod charge ses propres modèles : un pod de plus = 2 CPU et 2 Gi facturés en plus.
-- **Suspendre / reprendre** (économiser : en Autopilot, 0 pod = presque plus de calcul facturé ; le load balancer et l'IP réservée restent facturés). Le HPA remonte l'API à `minReplicas` : il faut le supprimer avant de passer à 0, et le réappliquer à la reprise (`TAG` = tag actuellement déployé, `kubectl get deploy toxic-api -o jsonpath='{.spec.template.spec.containers[0].image}'`) :
-  ```bash
-  # Suspendre
-  kubectl delete hpa toxic-api
-  kubectl scale deployment/toxic-api --replicas=0
-  kubectl -n monitoring scale deployment/grafana deployment/prometheus --replicas=0
-
-  # Reprendre (le apply recrée le HPA ; attendre ~1-2 min que /health réponde)
-  sed -e "s/REGION/$REGION/" -e "s/PROJECT_ID/$PROJECT/" -e "s/DOMAIN/$DOMAIN/" -e "s/IMAGE_TAG/$TAG/" \
-    k8s/toxic-api.yaml | kubectl apply -f -
-  kubectl scale deployment/toxic-api --replicas=3
-  kubectl -n monitoring scale deployment/grafana deployment/prometheus --replicas=1
-  ```
-- **Mettre à jour un modèle** (sans reconstruire l'image) : `gcloud storage cp -r artifacts/bert gs://$PROJECT-toxic-models/` puis `kubectl rollout restart deployment/toxic-api` (les modèles sont chargés au démarrage des pods).
-- **Sécurité** : HTTP simple (pas de HTTPS : clé d'API et texte en clair sur Internet, limite assumée), clé d'API (`X-API-Key`) dont seule l'empreinte est stockée dans Secret Manager (lecture réservée au compte de service de l'API, accès tracés dans Cloud Audit Logs) et limitation de débit par IP (Cloud Armor).
-- **Ajouter un client ou changer de clé sans coupure** : ajouter une version du secret contenant toutes les empreintes valides (une par ligne), puis redémarrer (le secret est lu au démarrage du pod) :
-  `printf '%s\n%s' "$EMPREINTE1" "$EMPREINTE2" | gcloud secrets versions add toxic-api-keys --data-file=-` puis `kubectl rollout restart deployment/toxic-api`.
-  Les anciennes versions restent consultables et réactivables (`gcloud secrets versions list toxic-api-keys`).
-- `TORCH_NUM_THREADS` doit suivre `resources.requests.cpu` ; `PRELOAD_MODELS` (défaut `bert`) liste les modèles chargés **et préchauffés** au démarrage (une inférence factice avant que `/health` réponde : un nouveau pod ne reçoit du trafic qu'une fois rapide). Précharger `laya` rallonge le démarrage : augmenter alors `failureThreshold` de la `startupProbe`.
-- **File d'attente des inférences** : une seule inférence à la fois par pod (`MAX_CONCURRENT_INFERENCES=1`), au plus `MAX_QUEUE_LENGTH` (8) requêtes en attente ; file pleine ou attente de plus de `INFERENCE_QUEUE_TIMEOUT` (2 s) : réponse `503` + `Retry-After` immédiate (délestage rapide plutôt qu'une latence qui explose). La file est gérée en asynchrone : une requête en attente n'occupe pas de thread, et `/health` répond même sous flood.
-- **Taille des requêtes** : corps limité à 4096 octets (`413`), vérifié avant lecture, y compris sans `Content-Length` ; `text` limité à 1500 caractères (`422`).
-- **En-têtes de sécurité** sur toutes les réponses de l'API : HSTS, `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`. `/docs` et `/openapi.json` fermés sauf `ENABLE_DOCS=1`.
-- Logs et état : `kubectl logs deploy/toxic-api` (journal JSON pseudonymisé), `kubectl get pods`.
-- Sans Docker en local : `gcloud builds submit --tag $IMAGE`.
-
-## Supervision (Prometheus / Grafana)
-
-Fichiers dans [k8s/monitoring/](k8s/monitoring/), namespace `monitoring`, **non exposé sur Internet** (accès par `kubectl port-forward`).
-
-| Composant | Rôle |
+| Besoin | Commande |
 |---|---|
-| Métriques de l'API ([toxicity/metrics_prom.py](toxicity/metrics_prom.py)) | Port 8081, interne au cluster (absent du Service et de l'Ingress). Requêtes par statut, latence, temps d'inférence, attente en file, scores, longueur des textes, CPU et mémoire du processus. Aucune donnée personnelle, labels bornés (un scan d'URL ne crée pas de séries) |
-| Prometheus | Découvre les pods de l'API (même ceux ajoutés par l'autoscaling), collecte toutes les 10 s, évalue les alertes. Historique 15 jours sur disque persistant (10 Gi). Droit minimal : lister les pods du namespace `default` |
-| Grafana | Tableau de bord « Toxic API - supervision » (page d'accueil) + logs pseudonymisés de Cloud Logging dans **Explore** |
+| Nouvelle version | §8.3 avec un nouveau `TAG` (le changement de tag déclenche le déploiement progressif) |
+| Retour arrière | §8.3 avec l'ancien `TAG` (tag en cours : `kubectl get deploy toxic-api -o jsonpath='{.spec.template.spec.containers[0].image}'`) |
+| Mettre à jour un modèle | `gcloud storage cp -r artifacts/bert gs://$PROJECT-toxic-models/` puis `kubectl rollout restart deployment/toxic-api` |
+| Ajouter ou changer une clé sans coupure | `printf '%s\n%s' "$EMPREINTE1" "$EMPREINTE2" \| gcloud secrets versions add toxic-api-keys --data-file=-` puis `kubectl rollout restart deployment/toxic-api` |
+| Journaux | `kubectl logs deploy/toxic-api` ou Cloud Logging, filtre `resource.labels.container_name="toxic-api"` |
+| Autoscaling | `kubectl get hpa toxic-api` |
 
-**Alertes** ([alert-rules.yml](k8s/monitoring/alert-rules.yml)) :
+## 9. Supervision et observabilité
 
-| Alerte | Déclencheur | Ce qu'elle révèle |
-|---|---|---|
-| `LatencySLOViolated` | < 95 % des requêtes en moins d'1 s, 5 min | SLO de latence non tenu |
-| `HighErrorRate` | > 1 % de 5xx, 5 min | Erreurs serveur |
-| `OverloadShedding` | Des 503 (file d'attente pleine), 2 min | Capacité insuffisante |
-| `HighCPU` / `HighMemory` | > 90 % des 2 CPU / > 1,7 Go (limite 2 Gi), 5 min | Saturation, fuite mémoire, risque d'arrêt OOM |
-| `PodDown` / `BelowMinReplicas` / `ApiMetricsAbsent` | Pod muet / < 3 pods / plus aucun pod | Panne, failover |
-| `AuthFailureSpike` | > 30 clés refusées/min, 2 min | Force brute sur les clés |
-| `ScanDetected` | > 20 req/min vers des URL inconnues | Scan de vulnérabilités |
-| `ToxicityRatioAnomaly` | > 80 % de textes toxiques, 15 min | Dérive des données, abus, modèle défaillant |
-
-**Installation** (après le déploiement de l'API, qui expose le port de métriques) :
+**Installation** (après le §8) :
 
 ```bash
-# Mot de passe admin de Grafana, dans un Secret (jamais dans git)
+source deploy.env
 kubectl create namespace monitoring
 kubectl -n monitoring create secret generic grafana-admin --from-literal=password="$(openssl rand -base64 18)"
-
-# Lecture des logs de l'API par Grafana (Workload Identity, lecture seule)
 gcloud projects add-iam-policy-binding $PROJECT --role=roles/logging.viewer --condition=None \
-  --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT.svc.id.goog/subject/ns/monitoring/sa/grafana"
-
+  --member="$WI/monitoring/sa/grafana"           # Grafana lit les journaux (lecture seule)
 kubectl kustomize k8s/monitoring | sed "s/PROJECT_ID/$PROJECT/" | kubectl apply -f -
 kubectl -n monitoring rollout status deployment/prometheus deployment/grafana
 ```
 
-**Accès** (un terminal par outil, laissé ouvert) :
+**Accès** (namespace non exposé sur Internet, uniquement par tunnel authentifié) :
 
 ```bash
-kubectl -n monitoring port-forward svc/grafana 3000:3000        # http://localhost:3000 (admin)
-kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.password}' | base64 -d   # mot de passe
-kubectl -n monitoring port-forward svc/prometheus 9090:9090     # http://localhost:9090/alerts
+kubectl -n monitoring port-forward svc/grafana 3000:3000      # http://localhost:3000, utilisateur admin
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.password}' | base64 -d
+kubectl -n monitoring port-forward svc/prometheus 9090:9090   # http://localhost:9090/alerts
 ```
 
-**Analyser une anomalie** : repérer l'heure sur le tableau de bord, puis dans Grafana **Explore → Cloud Logging**, filtrer les logs de l'API sur cette période :
+**Métriques exposées** par l'API ([toxicity/metrics_prom.py](toxicity/metrics_prom.py), port 8081 interne au cluster, sans donnée personnelle, labels bornés) :
 
-```
-resource.type="k8s_container" AND resource.labels.container_name="toxic-api"
-jsonPayload.event="auth_failed"          # quelles IP (pseudonymisées) échouent, à quel rythme
-jsonPayload.status>=500                  # erreurs serveur et délestage
-jsonPayload.latency_ms>2000              # requêtes lentes : quel pod, quelle longueur de texte
-```
+| Métrique | Question à laquelle elle répond |
+|---|---|
+| `toxic_api_requests_total{status}` | Combien de requêtes, avec quel résultat (200, 401, 429, 503…) ? |
+| `toxic_api_request_duration_seconds` | Quelle latence voit le client (P50 / P95 / P99) ? |
+| `toxic_api_inference_duration_seconds` vs `toxic_api_queue_wait_seconds` | Le temps est-il passé dans le modèle ou à attendre son tour ? (distingue « modèle lent » de « pod saturé ») |
+| `toxic_api_queue_waiting` | Combien de requêtes attendent, par pod ? (indicateur de saturation plus précoce que le CPU) |
+| `toxic_api_shed_total{reason}` | Les refus visent-ils l'attaquant (`ip_limit`, `evicted`) ou tout le monde (`full`, `timeout`) ? |
+| `toxic_api_toxicity_score` · `toxic_api_text_length_chars` | Dérive des données ou abus (part de textes toxiques, textes anormalement longs) |
+| CPU, mémoire du processus | Saturation, fuite mémoire |
 
-Modifier une règle ou le tableau de bord : éditer le fichier puis relancer la commande `kubectl kustomize … | kubectl apply` (le pod concerné redémarre seul).
+**Tableau de bord Grafana** « Toxic API - supervision » ([dashboard-toxic-api.json](k8s/monitoring/dashboard-toxic-api.json)), 4 sections : vue d'ensemble (débit, P95, erreurs, pods, échecs d'authentification, alertes), trafic et latence (dont inférence vs attente), ressources des pods, sécurité et comportement anormal. Les journaux pseudonymisés de Cloud Logging sont consultables dans **Explore**.
 
-## Test de charge (Locust)
+**Alertes** ([alert-rules.yml](k8s/monitoring/alert-rules.yml)) : SLO de latence (95 % < 1 s), taux de 5xx, délestage, CPU / mémoire, pods manquants, pic d'échecs d'authentification (force brute), scan d'URL, anomalie de la part de textes toxiques. Analyse et captures : [livrables_tp1/06_supervision_securite/SUPERVISION.md](livrables_tp1/06_supervision_securite/SUPERVISION.md).
 
-Tous les réglages sont dans [loadtest/config.toml](loadtest/config.toml) : cible (`host`, `model`), fichier de la clé, rythme des utilisateurs, scénarios (paliers modifiables) et instant du failover. Chaque utilisateur virtuel envoie ~1 requête/s à `POST /model` avec des textes de longueurs variées (aucune donnée personnelle) :
+## 10. Tests de charge
 
-| Scénario | Profil | Durée | Objectif |
-|---|---|---|---|
-| `ramp` | 5 → 120 utilisateurs par paliers de 90 s | 12 min | Croissance progressive : suivre l'autoscaling, trouver le point de saturation |
-| `smoke` | 2 utilisateurs | 30 s | Vérification rapide (clé, Cloud Armor, URL) avant un vrai test |
-| `rapid` | 0 → 120 utilisateurs en 12 s, maintenus | 8 min | Montée rapide : délai de réaction de l'autoscaling, erreurs pendant le rattrapage |
-| `soak` | 60 utilisateurs constants | 30 min | Charge soutenue : stabilité de la latence et de la mémoire dans la durée |
-| `failover` | 40 utilisateurs, un pod supprimé à 5 min | 10 min | Reprise après la perte d'un pod |
-| `stress` | 0 → 200 utilisateurs en 1 min | 5 min | Stress : comportement au-delà de la capacité, délai de l'autoscaling |
-| `spike` | 10 → 150 → 10 utilisateurs | 8 min | Pic soudain puis retour au calme (montée et descente du nombre de pods) |
+Locust, scénarios décrits dans [loadtest/config.toml](loadtest/config.toml) (modifiables sans toucher au code). Chaque scénario relève aussi le nombre de pods et le CPU toutes les 15 s, pour suivre l'autoscaling.
+
+| Scénario | Profil | Ce qu'il vérifie |
+|---|---|---|
+| `smoke` | 2 utilisateurs, 30 s | Clé, URL et Cloud Armor avant un vrai test |
+| `ramp` | 5 → 120 utilisateurs par paliers | Point de saturation, réaction de l'autoscaling |
+| `rapid` | 0 → 120 en 12 s | Délai de réaction de l'autoscaling à un pic brutal |
+| `soak` | 60 utilisateurs, 30 min | Stabilité de la latence et de la mémoire dans la durée |
+| `failover` | 40 utilisateurs, **un pod supprimé à 5 min** | Reprise après panne |
+| `stress` | 0 → 200 en 1 min | Comportement au-delà de la capacité |
+| `spike` | 10 → 150 → 10 | Montée puis descente du nombre de pods |
 
 ```bash
-printf '%s' "dss_..." > loadtest/.api_key   # une clé valide (make_api_key.py) ; fichier exclu de git
-
-# Cloud Armor limite à 100 requêtes/min/IP et bannit au-delà de 200 : exception temporaire pour
-# la machine de test. Priorité 950 : après le filtre de taille (900), avant le ban (1000).
-MY_IP=$(curl -s https://ifconfig.me)
+source deploy.env
+printf '%s' "dss_..." > loadtest/.api_key       # clé de test (fichier ignoré par git)
+# Lever les protections anti-abus pour la machine de test, le temps du test
 gcloud compute security-policies rules create 950 --security-policy toxic-api-policy \
-  --src-ip-ranges "$MY_IP/32" --action allow --description "test de charge (temporaire)"
-# L'API plafonne aussi à 4 requêtes en cours par IP et par pod (429) : le lever le temps du test.
+  --src-ip-ranges "$(curl -s https://ifconfig.me)/32" --action allow --description "test de charge"
 kubectl set env deployment/toxic-api MAX_IN_FLIGHT_PER_IP=0
 
-uv run python loadtest/run.py --list    # scénarios disponibles
-uv run python loadtest/run.py smoke     # vérification rapide
-uv run python loadtest/run.py ramp      # puis rapid, soak, failover, stress, spike
-uv run python loadtest/summarize.py     # tableau Markdown de tous les tests, pour le rapport
+uv run python loadtest/run.py smoke --host http://$DOMAIN
+uv run python loadtest/run.py ramp --host http://$DOMAIN     # puis rapid, soak, failover, stress, spike
+uv run python loadtest/summarize.py                           # tableau de tous les tests
 
-# À la fin : supprimer l'exception et rétablir le plafond par IP
+# Rétablir les protections
 gcloud compute security-policies rules delete 950 --security-policy toxic-api-policy --quiet
 kubectl set env deployment/toxic-api MAX_IN_FLIGHT_PER_IP=4
 ```
 
-Résultats dans `loadtest/results/` : `<test>_stats.csv` (latences moyenne, P50/P95/P99, erreurs), `<test>_stats_history.csv` (évolution dans le temps), `<test>.html` (graphiques Locust, à joindre au rapport), `<test>_hpa.txt` (pods et CPU toutes les 15 s), `<test>_events.txt` (heure du failover).
+Résultats dans `loadtest/results/` (statistiques CSV, rapports HTML Locust, relevés de l'autoscaling). Analyse : [livrables_tp1/05_charge/RAPPORT_CHARGE.md](livrables_tp1/05_charge/RAPPORT_CHARGE.md). Mode interactif : `uv run locust -f loadtest/locustfile.py` puis http://localhost:8089.
 
-- **Failover** : `failover` supprime automatiquement un pod à `failover_at` secondes (config). Comparer erreurs et latence autour de cet instant dans `<test>_stats_history.csv`. Le HPA garde au moins 3 pods : les 2 autres prennent le relais pendant le redémarrage.
-- **Mémoire pendant `soak`** : `kubectl top pods -l app=toxic-api` en début et en fin de test (une hausse continue signalerait une fuite).
-- **Mode interactif** : `uv run locust -f loadtest/locustfile.py` puis http://localhost:8089 (choix libre du nombre d'utilisateurs, graphiques en direct).
-- **Attaque (étape 6)** : relancer `stress` **sans** l'exception Cloud Armor : les requêtes au-delà de 100/min reçoivent `429` et n'atteignent pas l'API.
-- **Coût** : `stress` et `ramp` peuvent monter jusqu'à `maxReplicas` pods (2 CPU et 2 Gi chacun). Le quota de CPU de la région peut bloquer avant : les pods en trop restent alors en `Pending`.
+## 11. Attaque et défense (TP2)
 
-## Pipeline CI/CD (GitHub Actions)
-
-Le workflow `.github/workflows/devsecops.yml` se lance à chaque push sur `main` et à chaque pull request. Ses 10 jobs tournent en parallèle ; un seul échec met la pipeline en échec et peut bloquer la fusion. Le workflow n'a que le droit de lire le dépôt, et les outils tournent en conteneur ou via `uvx`, à version fixée.
-
-| Job | Outil | Ce qu'il vérifie |
-|---|---|---|
-| `gitleaks` | gitleaks | Secrets (clés, mots de passe) dans le code et dans tout l'historique git |
-| `pip-audit` | pip-audit | Failles connues dans les versions exactes de `uv.lock` |
-| `bandit` | bandit | Failles dans le code Python (sévérité moyenne et plus) |
-| `ruff` | ruff | Style, bugs probables et règles de sécurité (config : `[tool.ruff]` dans `pyproject.toml`) |
-| `hadolint` | hadolint | Bonnes pratiques du `Dockerfile` |
-| `trivy-image` | trivy | Construit l'image (amd64) puis cherche des failles HIGH et CRITICAL (celles sans correctif disponible sont ignorées) |
-| `kubeconform` | kubeconform | Validité du manifeste `k8s/toxic-api.yaml` (mode strict ; les CRD GKE, sans schéma public, sont ignorés) |
-| `kube-linter` | kube-linter | Bonnes pratiques de sécurité du manifeste (non-root, système de fichiers en lecture seule, etc.) |
-| `tests` | pytest | Défenses de l'API : en-têtes, docs fermées, limites de taille (413/422), réponse sans scores, plafond par IP (429), file équitable ([tests/](tests/)) |
-| `model-card` | [ci/check_model_card.py](ci/check_model_card.py) | Conformité IA Act de `model_card.json` : champs exigés, niveau de risque autorisé et justifié, biais documenté |
-
-Pour reproduire les contrôles Python en local :
+Attaque par déni de service sur l'endpoint d'inférence, menée contre un autre groupe et subie de la part d'un groupe et du professeur ; défenses en couches mesurées avant / après. Tout est dans [livrable_tp2/](livrable_tp2/) ; code et analyses dans [attack/](attack/).
 
 ```bash
-uvx ruff check .
-uvx bandit -c pyproject.toml -r . -ll
-uv run pytest -v
-python ci/check_model_card.py
+uv run python attack/dos.py http://<cible> --endpoint /health --duration 30 --concurrency 100   # tir borné
+uv run python attack/bench_defense.py run --ref 451d731 --label avant   # version attaquée (~5 min)
+uv run python attack/bench_defense.py run --label apres                  # version défendue (~5 min)
+uv run python attack/bench_defense.py report                             # tableau + graphiques
 ```
 
-Les exceptions assumées sont documentées là où elles sont déclarées : `[tool.ruff]` et `[tool.bandit]` dans `pyproject.toml` (par exemple `B615`, sans objet car l'image tourne en `HF_HUB_OFFLINE=1`), et les commentaires `# noqa`.
+Le banc lance l'API en local dans les deux versions et mesure, pendant l'attaque, la précision, le taux de faux positifs et la latence vécus par des clients légitimes. Il nécessite `artifacts/bert/` (§5).
 
-## Ajouter un modèle
+## 12. Pipeline CI/CD DevSecOps
 
-1. Créer `toxicity/models/<nom>.py` avec une classe héritant de `ToxicityModel` (`fit`, `predict_proba`, `save`, `load`).
-   Un modèle PyTorch peut réutiliser `toxicity/models/torch_trainer.py` ; un modèle scikit-learn implémente simplement `fit` / `predict_proba`.
-2. L'enregistrer dans `toxicity/models/registry.py`.
-3. `train.py --model <nom>` puis `compare.py`.
+[.github/workflows/devsecops.yml](.github/workflows/devsecops.yml) s'exécute à chaque push sur `main` et chaque pull request ; un seul échec bloque la fusion. Droits en lecture seule, outils à version fixée.
 
+| Job | Contrôle |
+|---|---|
+| `gitleaks` | Secrets dans le code et tout l'historique git |
+| `pip-audit` | Dépendances vulnérables (versions exactes de `uv.lock`) |
+| `bandit` · `ruff` | Failles et bugs probables dans le code Python |
+| `hadolint` · `trivy-image` | Bonnes pratiques du Dockerfile · failles HIGH/CRITICAL de l'image construite |
+| `kubeconform` · `kube-linter` | Validité et sécurité du manifeste Kubernetes |
+| `tests` | Tests des défenses de l'API ([tests/](tests/)) |
+| `model-card` | Conformité IA Act de `model_card.json` ([ci/check_model_card.py](ci/check_model_card.py)) |
 
+Rejouer en local les contrôles qui ne demandent pas Docker (un log par contrôle) : `bash ci/local_checks.sh`. Détail et problèmes trouvés par la pipeline : [livrable_tp2/5_devsecops.md](livrable_tp2/5_devsecops.md).
+
+## 13. Choix techniques et alternatives
+
+| Choix | Alternatives | Pourquoi ce choix |
+|---|---|---|
+| **GKE Autopilot** | Cloud Run, GKE Standard, VM | Autoscaling horizontal fin, volumes partagés pour les modèles, Cloud Armor via l'Ingress, Prometheus dans le cluster ; Autopilot facture les pods et non les nœuds, et gère les mises à jour. Cloud Run aurait été plus simple, mais limite le contrôle (file d'attente, sondes, supervision) |
+| **DistilBERT** servi par défaut | LSTM, LAYA (ModernBERT-large) | Les trois ont été entraînés et comparés (§5) : BERT a la meilleure ROC-AUC à un coût acceptable sur CPU ; LAYA n'apporte rien de plus pour 3 Go de mémoire par pod |
+| **Inférence sur CPU** | GPU | ~8 requêtes/s par pod suffisent à la charge visée ; un nœud GPU coûte beaucoup plus cher en permanence |
+| **Poids dans Cloud Storage** (lecture seule) | Poids dans l'image | Image légère (build et push rapides), modèle mis à jour sans reconstruire l'image, partagé par tous les pods quel que soit le nœud |
+| **spaCy + regex** pour l'anonymisation | Presidio, modèles NER plus gros | spaCy repère les noms ; les regex sont exactes sur les formats structurés (IP, email, téléphone) que le NER rate. Léger et rapide sur 300 000 commentaires |
+| **Clé d'API + empreinte** dans Secret Manager | OAuth 2 / JWT, IAM Google | Simple pour quelques applications clientes, révocable par client, rien d'exploitable en cas de fuite du secret. JWT recommandé au-delà de quelques clients |
+| **HMAC** pour pseudonymiser les journaux | Hachage simple, suppression des IP | Un hachage simple d'IP se retrouve par force brute (4 milliards de valeurs) ; le HMAC à clé secrète ne le permet pas, tout en gardant la possibilité de suivre une IP abusive |
+| **Prometheus + Grafana** dans le cluster | Cloud Monitoring, Managed Prometheus | Métriques métier sur mesure (attente en file, délestage), tableau de bord et alertes versionnés dans git, aucun coût d'ingestion |
+| **Locust** | k6, JMeter | Scénarios écrits en Python comme le reste du projet, paliers et failover pilotés par un fichier de configuration |
+| **uv** | pip, Poetry, conda | Installation rapide, `uv.lock` reproductible, index PyTorch différent selon la plateforme (CUDA, CPU, MPS) |
+| **Défense en couches** contre les abus | Cloud Armor seul | Mesuré : Cloud Armor a arrêté un groupe, mais pas l'attaque du professeur passée sous ses seuils. L'API doit aussi refuser vite et équitablement ([livrable_tp2/3_defense.md](livrable_tp2/3_defense.md)) |
+
+## 14. Résultats clés et pistes d'amélioration
+
+| Domaine | Résultat |
+|---|---|
+| Qualité du modèle | ROC-AUC moyenne 0,985 (BERT) sur le test anonymisé ; au seuil 70 de l'API : précision 88 %, faux positifs 13 % (échantillon équilibré) |
+| Anonymisation | 40 % des commentaires d'entraînement pseudonymisés (35 % du test) ; regex relancées après coup pour détecter les fuites ; résultat pseudonymisé, pas anonyme au sens strict (noms mal reconnus possibles) |
+| Charge | 70 000 requêtes en 30 min sans erreur (`soak`) ; perte d'un pod sans erreur visible (`failover`) ; ≤ 0,03 % d'erreurs en stress |
+| Résistance aux abus | Sous flood depuis une IP, latence médiane des clients légitimes 1 001 → 81 ms après les défenses du TP2 |
+
+Limites connues et améliorations proposées :
+- **Latence au-delà de ~40 requêtes/s** (6 pods) : autoscaling sur la longueur de file plutôt que sur le CPU, modèle plus léger (ONNX, quantification) ou inférence par lots ([RAPPORT_CHARGE.md §4](livrables_tp1/05_charge/RAPPORT_CHARGE.md)).
+- **HTTP en production** : activer HTTPS (§7).
+- **Biais** : le modèle sur-signale les textes mentionnant certaines minorités ; relecture humaine obligatoire, jeu d'évaluation dédié à prévoir ([model_card.json](model_card.json)).
+- **Attaque très distribuée** : les défenses par IP limitent les dégâts sans les supprimer ; une clé par client et plus de capacité prête à l'avance ([livrable_tp2/6_analyse_critique.md](livrable_tp2/6_analyse_critique.md)).
+- **Déploiement continu** : la pipeline vérifie mais ne déploie pas encore.
+
+## 15. Coûts, arrêt et suppression
+
+Ce qui coûte en continu : le cluster (~0,10 $/h de frais de gestion Autopilot, plus 2 CPU et 2 Go par pod), l'IP réservée, la politique Cloud Armor et le load balancer.
+
+```bash
+source deploy.env
+# Suspendre (garde la configuration ; le cluster et le load balancer restent facturés)
+kubectl delete hpa toxic-api && kubectl scale deployment/toxic-api --replicas=0
+kubectl -n monitoring scale deployment/grafana deployment/prometheus --replicas=0
+# Reprendre : refaire le §8.3 avec le TAG en cours (recrée l'autoscaling), puis :
+kubectl scale deployment/toxic-api --replicas=3
+kubectl -n monitoring scale deployment/grafana deployment/prometheus --replicas=1
+
+# Tout supprimer (irréversible). D'abord l'Ingress, pour que GKE supprime le load balancer :
+# supprimer directement le cluster peut laisser des règles de load balancer orphelines (facturées).
+kubectl delete ingress toxic-api --wait
+gcloud compute forwarding-rules list            # attendre que la liste soit vide
+gcloud container clusters delete $CLUSTER --region $REGION --quiet
+gcloud compute addresses delete toxic-api-ip --global --quiet
+gcloud compute security-policies delete toxic-api-policy --quiet
+gcloud artifacts repositories delete toxic --location $REGION --quiet
+gcloud secrets delete toxic-api-keys --quiet && gcloud secrets delete toxic-api-log-key --quiet
+gcloud storage rm -r gs://$PROJECT-toxic-models
+```
+
+La politique Cloud Armor ne peut être supprimée qu'une fois le load balancer supprimé (elle lui est attachée). Vérifier ensuite dans la console **Facturation → Rapports** que les coûts retombent à zéro (délai d'affichage d'environ 24 h).
+
+## 16. Dépannage
+
+| Symptôme | Cause et solution |
+|---|---|
+| `RuntimeError: Aucune clé d'API` au démarrage | Définir `API_KEY_HASHES` (empreinte, pas la clé) ou `AUTH_DISABLED=1` en local |
+| `422` sur `/model` | Texte vide ou de plus de 1 500 caractères |
+| `429` pendant un test de charge | Limites anti-abus actives : voir §10 (exception Cloud Armor, `MAX_IN_FLIGHT_PER_IP=0`) |
+| Pods en `Pending` | Quota de CPU de la région atteint (chaque pod réserve 2 CPU) : réduire `maxReplicas` ou demander une hausse de quota |
+| Pod en `CrashLoopBackOff` | `kubectl logs deploy/toxic-api` : secret absent ou droit IAM manquant (§8.2), modèle absent du bucket |
+| `exec format error` sur GKE | Image construite sur Mac ARM sans `--platform linux/amd64` |
+| Certificat bloqué en `Provisioning` | Le domaine ne pointe pas vers l'IP ; avec `sslip.io`, attendre jusqu'à 1 h |
+| Pas de GPU détecté sous Windows | `uv run python -c "import torch; print(torch.cuda.is_available())"` ; pilote NVIDIA compatible CUDA 13 requis |
+
+---
+
+**Équipe :** Cléo Martin-Colleu, Titouan Robe — ESIGELEC, Déploiement de solutions IA et cybersécurité.

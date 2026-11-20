@@ -55,7 +55,9 @@ explicit = true
 # --- Qualité et sécurité du code (pipeline CI : .github/workflows/devsecops.yml) ---
 [tool.ruff]
 line-length = 120
-extend-exclude = ["artifacts", "old_artifacts", "results"]
+# livrables_tp1/ : copies figées du code à la date du rendu TP1 ; le code vivant (racine,
+# loadtest/, toxicity/...) est vérifié à sa place, avec ses propres exceptions.
+extend-exclude = ["artifacts", "old_artifacts", "results", "livrables_tp1"]
 
 [tool.ruff.lint]
 # E/F : erreurs et pyflakes ; I : tri des imports ; B : bugs probables ; S : règles de sécurité
@@ -77,7 +79,7 @@ testpaths = ["tests"]
 pythonpath = ["."]  # api.py et toxicity/ sont à la racine (pas de paquet installé)
 
 [tool.bandit]
-exclude_dirs = [".venv", "artifacts", "old_artifacts", "loadtest", "attack", "tests"]
+exclude_dirs = [".venv", "artifacts", "old_artifacts", "loadtest", "attack", "tests", "livrables_tp1"]
 # B615 : from_pretrained() sans `revision`. Les modèles de base sont téléchargés uniquement à
 # l'entraînement (PRETRAINED dans toxicity/models/*.py) ; en production l'image fixe
 # HF_HUB_OFFLINE=1 et charge les poids depuis un volume, aucun appel au Hub n'est fait.
