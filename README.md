@@ -2,11 +2,16 @@
 
 API d'IA qui indique si un commentaire est toxique, entraînée sur des données **anonymisées par NER**, déployée sur **Google Cloud (GKE Autopilot)** avec authentification, protection contre les abus, supervision Prometheus / Grafana, tests de charge et pipeline DevSecOps.
 
-```bash
-curl -X POST http://<adresse-de-l-api>/model -H "Content-Type: application/json" \
-     -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
-# {"is_toxic": true}
-```
+> ### API en ligne : **http://136.82.246.21**
+>
+> ```bash
+> curl http://136.82.246.21/health
+> curl -X POST http://136.82.246.21/model -H "Content-Type: application/json" \
+>      -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
+> # {"is_toxic": true}
+> ```
+>
+> Une clé d'API est nécessaire pour `/model` (à demander à l'équipe). Pour déployer votre propre instance : [§8](#8-déploiement-sur-google-cloud).
 
 | | |
 |---|---|
@@ -164,12 +169,10 @@ Principales variables d'environnement (liste complète en tête de [api.py](api.
 | **Minimisation** | Texte analysé jamais stocké ni journalisé ; IP jamais en clair ; journaux conservés 30 jours | [REGISTRE_TRAITEMENT.md](REGISTRE_TRAITEMENT.md) |
 | **Authentification** | Clé d'API de 256 bits ; seule son empreinte est stockée (Secret Manager) ; comparaison en temps constant ; échec fermé | [livrables_tp1/04_securite_rgpd/SECURITE.md](livrables_tp1/04_securite_rgpd/SECURITE.md) |
 | **IAM** | Workload Identity : une identité par composant, droits minimaux (l'API lit 2 secrets et 1 bucket, rien d'autre) ; aucune clé de compte de service | [ARCHITECTURE_CLOUD.md §4](docs/architecture/ARCHITECTURE_CLOUD.md) |
-| **Chiffrement** | Au repos : Secret Manager, Cloud Storage, Artifact Registry, Cloud Logging (AES-256, Google). En transit : réseau Google entre load balancer et pods ; certificat HTTPS géré prévu dans le manifeste | Voir la limite ci-dessous |
+| **Chiffrement** | Au repos : Secret Manager, Cloud Storage, Artifact Registry, Cloud Logging (AES-256, Google). En transit : réseau Google entre load balancer et pods | [ARCHITECTURE_CLOUD.md](docs/architecture/ARCHITECTURE_CLOUD.md) |
 | **Protection contre les abus** | Cloud Armor (100 req/min par IP, ban 10 min au-delà de 200, corps > 4 Ko rejetés) ; dans l'API : plafond par IP, file équitable, délestage rapide, limites de taille, en-têtes de sécurité, docs fermées | [livrable_tp2/3_defense.md](livrable_tp2/3_defense.md) |
 | **Conteneurs** | Non-root, système de fichiers en lecture seule, capabilities retirées, modèles montés en lecture seule | [k8s/toxic-api.yaml](k8s/toxic-api.yaml) |
 | **Conformité** | Registre RGPD (art. 30), hébergement UE, fiche IA Act (risque minimal), model card vérifiée par la CI | [REGISTRE_TRAITEMENT.md](REGISTRE_TRAITEMENT.md), [livrable_tp2/4_fiche_ia_act.md](livrable_tp2/4_fiche_ia_act.md), [model_card.json](model_card.json) |
-
-> **Limite assumée : l'API publique est servie en HTTP.** La clé et le texte circulent en clair entre le client et le load balancer. Pour passer en HTTPS : pointer un domaine vers l'IP (ou utiliser `<IP>.sslip.io`), attendre que le certificat géré soit `Active` (§8), puis mettre `kubernetes.io/ingress.allow-http: "false"` dans le manifeste.
 
 ## 8. Déploiement sur Google Cloud
 
@@ -244,7 +247,6 @@ curl http://$DOMAIN/health                       # {"status":"ok",...} (load bal
 curl -X POST http://$DOMAIN/model -H "Content-Type: application/json" \
   -H "X-API-Key: <clé>" -d '{"text": "You are an idiot"}'
 curl -s -o /dev/null -w "%{http_code}\n" http://$DOMAIN/docs     # 404 : docs fermées
-kubectl describe managedcertificate toxic-api-cert                # HTTPS : attendre "Active"
 ```
 
 **8.5 Opérations courantes**
@@ -385,7 +387,6 @@ Rejouer en local les contrôles qui ne demandent pas Docker (un log par contrôl
 
 Limites connues et améliorations proposées :
 - **Latence au-delà de ~40 requêtes/s** (6 pods) : autoscaling sur la longueur de file plutôt que sur le CPU, modèle plus léger (ONNX, quantification) ou inférence par lots ([RAPPORT_CHARGE.md §4](livrables_tp1/05_charge/RAPPORT_CHARGE.md)).
-- **HTTP en production** : activer HTTPS (§7).
 - **Biais** : le modèle sur-signale les textes mentionnant certaines minorités ; relecture humaine obligatoire, jeu d'évaluation dédié à prévoir ([model_card.json](model_card.json)).
 - **Attaque très distribuée** : les défenses par IP limitent les dégâts sans les supprimer ; une clé par client et plus de capacité prête à l'avance ([livrable_tp2/6_analyse_critique.md](livrable_tp2/6_analyse_critique.md)).
 - **Déploiement continu** : la pipeline vérifie mais ne déploie pas encore.
@@ -427,7 +428,6 @@ La politique Cloud Armor ne peut être supprimée qu'une fois le load balancer s
 | Pods en `Pending` | Quota de CPU de la région atteint (chaque pod réserve 2 CPU) : réduire `maxReplicas` ou demander une hausse de quota |
 | Pod en `CrashLoopBackOff` | `kubectl logs deploy/toxic-api` : secret absent ou droit IAM manquant (§8.2), modèle absent du bucket |
 | `exec format error` sur GKE | Image construite sur Mac ARM sans `--platform linux/amd64` |
-| Certificat bloqué en `Provisioning` | Le domaine ne pointe pas vers l'IP ; avec `sslip.io`, attendre jusqu'à 1 h |
 | Pas de GPU détecté sous Windows | `uv run python -c "import torch; print(torch.cuda.is_available())"` ; pilote NVIDIA compatible CUDA 13 requis |
 
 ---
